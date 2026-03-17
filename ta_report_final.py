@@ -2447,42 +2447,62 @@ def _cover():
     """Render cover slide — white background, bank-style design."""
     names = " &middot; ".join(a["meta"]["name"] for a in report_data.values())
 
-    # Abstract pencil-drawing-lines illustration — right-side background motif
-    _ruled_lines = ""
-    for _li in range(24):
-        _y   = 30 + _li * 28
-        _x2  = 590 - (_li % 5) * 18          # subtle length variation
-        _op  = round(0.055 + (_li % 3) * 0.018, 3)
-        _ruled_lines += (
-            f'<line x1="0" y1="{_y}" x2="{_x2}" y2="{_y}" '
-            f'stroke="#11366B" stroke-width="1" opacity="{_op}"/>'
-        )
-
-    # Pencil: translate to center (470, 555), rotate -35°, drawn pointing upward in local coords
-    _pencil_svg = (
-        '<g transform="translate(470,555) rotate(-35)">'
-        # Eraser cap
-        '<rect x="-12" y="-108" width="24" height="18" rx="3" '
-        'fill="#f9a8d4" opacity="0.55" stroke="#11366B" stroke-width="1.5"/>'
-        # Metal ferrule band
-        '<rect x="-12" y="-90" width="24" height="9" fill="#11366B" opacity="0.40"/>'
-        # Body
-        '<rect x="-12" y="-81" width="24" height="128" '
-        'fill="#11366B" opacity="0.10" stroke="#11366B" stroke-width="1.5"/>'
-        # Wood cone
-        '<polygon points="-12,47 12,47 0,78" fill="#11366B" opacity="0.18" '
-        'stroke="#11366B" stroke-width="1.5" stroke-linejoin="round"/>'
-        # Graphite tip
-        '<polygon points="-4,78 4,78 0,88" fill="#11366B" opacity="0.55"/>'
-        '</g>'
-    )
-
+    # Continuous line-art illustration: pencil → flowing line → loops → bar chart
+    # All elements share the same stroke style (navy, thin, no fill) — mimics a
+    # single-stroke sketch as seen in investment/analytics brand design.
     _art_div = (
-        '<div style="position:absolute;top:0;right:0;width:600px;height:720px;'
+        '<div style="position:absolute;top:0;right:0;width:640px;height:720px;'
         'overflow:hidden;pointer-events:none;z-index:0">'
-        '<svg viewBox="0 0 600 720" width="600" height="720" '
-        'xmlns="http://www.w3.org/2000/svg">'
-        + _ruled_lines + _pencil_svg +
+        '<svg viewBox="0 0 640 720" width="640" height="720" '
+        'xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#11366B" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+
+        # — Pencil body (bottom-left of illustration, rotated -25°) —
+        '<g transform="translate(82,648) rotate(-25)">'
+        '<rect x="-7" y="-50" width="14" height="36" rx="1" stroke-width="1.4" opacity="0.55"/>'
+        '<line x1="-7" y1="-50" x2="7" y2="-50" stroke-width="3.5" opacity="0.22"/>'
+        '<line x1="-7" y1="-42" x2="7" y2="-42" stroke-width="1.0" opacity="0.30"/>'
+        '<polygon points="-7,-14 7,-14 0,5" stroke-width="1.4" opacity="0.55"/>'
+        '</g>'
+
+        # — Flowing line from pencil tip into the composition —
+        '<path d="M 94,643 C 138,632 188,612 228,586 C 268,560 294,528 316,494'
+        ' C 330,472 338,450 338,432" stroke-width="1.6" opacity="0.52"/>'
+
+        # — Bar chart (base + 4 bars, drawn as open rectangles) —
+        '<line x1="325" y1="432" x2="502" y2="432" stroke-width="1.6" opacity="0.50"/>'
+        '<path d="M 340,432 L 340,338 L 368,338 L 368,432" stroke-width="1.6" opacity="0.50"/>'
+        '<path d="M 376,432 L 376,278 L 404,278 L 404,432" stroke-width="1.6" opacity="0.50"/>'
+        '<path d="M 412,432 L 412,220 L 440,220 L 440,432" stroke-width="1.6" opacity="0.50"/>'
+        '<path d="M 448,432 L 448,262 L 476,262 L 476,432" stroke-width="1.6" opacity="0.50"/>'
+
+        # — Line from top of tallest bar up and into the outer loop —
+        '<path d="M 412,220 C 406,195 396,168 380,148 C 364,128 342,116 318,120'
+        ' C 294,124 274,142 264,166 C 254,190 258,218 272,240'
+        ' C 286,262 308,274 332,276" stroke-width="1.5" opacity="0.42"/>'
+
+        # — Outer loop sweeping right and around the chart —
+        '<path d="M 338,432 C 338,420 344,400 362,382 C 380,364 408,354 438,350'
+        ' C 468,346 502,352 526,370 C 550,388 562,416 558,444'
+        ' C 554,472 534,496 506,508 C 478,520 444,518 416,506'
+        ' C 388,494 368,472 362,448 C 356,424 366,400 382,386"'
+        ' stroke-width="1.4" opacity="0.30"/>'
+
+        # — Second, larger outer loop (gives the orbiting feel) —
+        '<path d="M 332,276 C 358,270 392,268 424,272 C 466,278 506,296 532,326'
+        ' C 558,356 564,396 554,432 C 544,468 518,498 482,514'
+        ' C 446,530 402,528 364,512 C 326,496 298,464 288,428'
+        ' C 278,392 290,352 314,326 C 338,300 372,284 408,280"'
+        ' stroke-width="1.3" opacity="0.22"/>'
+
+        # — Top flourish: line trailing off top-right —
+        '<path d="M 318,120 C 320,96 334,72 358,58 C 382,44 412,44 434,56'
+        ' C 456,68 466,92 460,116" stroke-width="1.3" opacity="0.28"/>'
+
+        # — Bottom-right decorative trailing loop —
+        '<path d="M 558,444 C 574,472 585,508 578,540 C 571,572 550,596 558,622'
+        ' C 564,640 582,650 598,644" stroke-width="1.3" opacity="0.24"/>'
+
         '</svg></div>'
     )
 
@@ -2594,17 +2614,17 @@ body {
 }
 .container { max-width: 1400px; margin: 0 auto; }
 
-/* Slide wrapper — 1280x720 fixed */
+/* Slide wrapper — scrollable in browser, paginated in print */
 .slide-container {
-  width: 1280px; height: 720px; background: white; margin: 0 auto;
-  box-shadow: 0 20px 25px -5px rgba(0,0,0,.12), 0 8px 10px -6px rgba(0,0,0,.06);
-  overflow: hidden;
+  width: 1280px; height: auto; margin: 0 auto; overflow: visible;
 }
 
 /* Slide base */
 .slide-content {
   width: 1280px; height: 720px; padding: 14px 24px 10px;
   display: flex; flex-direction: column; overflow: hidden;
+  background: white; margin-bottom: 20px;
+  box-shadow: 0 20px 25px -5px rgba(0,0,0,.12), 0 8px 10px -6px rgba(0,0,0,.06);
 }
 
 /* Page 1 header */
@@ -2738,13 +2758,13 @@ td { padding: 1px 6px; font-size: 10.5px; border-bottom: 1px solid #e5e7eb; }
 }
 
 @media print {
-  body { background: white; padding: 0; }
-  .container { max-width: none; }
-  .slide-container { box-shadow: none; width: 100%; height: auto; overflow: visible; }
+  body { background: white; padding: 0; margin: 0; }
+  .container { max-width: none; margin: 0; padding: 0; }
+  .slide-container { width: 100%; height: auto; overflow: visible; margin: 0; }
   .slide-content {
-    page-break-after: always; break-after: page;
+    page-break-after: always; break-after: page; page-break-inside: avoid;
     width: 100%; height: 100vh; overflow: hidden;
-    padding: 20px 28px 12px;
+    padding: 20px 28px 12px; margin-bottom: 0; box-shadow: none;
   }
 }
 """
