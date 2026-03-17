@@ -96,8 +96,14 @@ for _try in ["alphaBank_logo%20(1).svg",
 if not _LOGO_SVG_RAW:
     print("No logo file found — using inline fallback")
 
-print("CELL 2 OK — FETCH_START: " + FETCH_START
-      + " | CHART_START: " + CHART_START + " | END: " + END_DATE)
+# ── Claude API config — set key here; leave blank to use deterministic template fallback ──
+CLAUDE_API_KEY = ""
+CLAUDE_MODEL   = "claude-sonnet-4-6"
+CLAUDE_TEMP    = 0.3
+
+print("CELL 2 OK \u2014 FETCH_START: " + FETCH_START
+      + " | CHART_START: " + CHART_START + " | END: " + END_DATE
+      + " | Claude: " + ("configured" if CLAUDE_API_KEY else "template fallback"))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -119,7 +125,11 @@ def fetch_ohlcv(ticker, max_retries=3):
     last_error = None
     for attempt in range(max_retries):
         try:
-            # Per-field BQL fetch (no bql.combined_df)
+            # Per-field BQL fetch — rationale:
+            #   close (px_last) is most critical: all indicators depend on it.
+            #   open/high/low needed for candlestick rendering and ATR/ADX computation.
+            #   volume is last: FX assets suppress it downstream (has_meaningful_volume=False).
+            #   Order matches col_names list below for index-based column renaming on merge.
             fields = {
                 "px_open":   bq.data.px_open(dates=bq.func.range(START_DATE, END_DATE), per="D", fill="prev"),
                 "px_high":   bq.data.px_high(dates=bq.func.range(START_DATE, END_DATE), per="D", fill="prev"),
@@ -350,6 +360,8 @@ def _compute_weekly_indicators(df):
         "w_stoch_k":  _safe(w_stoch_k, last),
         "w_stoch_d":  _safe(w_stoch_d, last),
         "w_adx":      _safe(w_adx, last),
+        "w_di_plus":  _safe(dip.values, last),   # weekly DI+ for correct adx_sig() call
+        "w_di_minus": _safe(din.values, last),   # weekly DI- for correct adx_sig() call
     }
 
 
@@ -394,6 +406,7 @@ def compute_indicators(df, asset_type="index"):
     df["adx"]      = dx.ewm(span=14, adjust=False).mean().values
     df["di_plus"]  = dip.values    # bullish directional indicator
     df["di_minus"] = din.values    # bearish directional indicator
+    df["atr"]      = atr.values    # Average True Range (14) — for volatility-normalised thresholds
 
     # ── Stochastic (14/3/3) ───────────────────────────────────────────────────
     low14 = ls.rolling(14).min(); high14 = hs.rolling(14).max()
@@ -508,8 +521,11 @@ def stoch_sig(k, d):
 def compute_bias_score(close, sma21, sma55, sma200,
                        macd, macd_signal, rsi,
                        di_plus, di_minus, adx,
-                       price_roc_20):
-    """Weighted bias score. Max raw score = 100. Components are independent and non-redundant."""
+                       price_roc_20, divergence=None,
+                       stoch_k=50.0, stoch_d=50.0):
+    """Weighted bias score. Max raw score ~110, clamped to 100.
+    Components: trend structure (40) + momentum (30) + directional (30) + oscillator confluence (10).
+    """
     score = 0
 
     # COMPONENT 1 — Trend structure (40 pts total)
@@ -540,12 +556,25 @@ def compute_bias_score(close, sma21, sma55, sma200,
     elif macd > macd_signal:            score += 6
     elif macd < 0:                      score -= 6
 
-    if   di_plus > di_minus and adx >= 20: score += 10
-    elif di_plus > di_minus:               score += 4
-    elif di_minus > di_plus and adx >= 20: score -= 6
+    if   di_plus > di_minus and adx >= 25: score += 10   # Strong bullish trend (mirrors adx_sig threshold)
+    elif di_plus > di_minus and adx >= 20: score += 5    # Weak bullish trend: partial bonus
+    elif di_plus > di_minus:               score += 2    # No trend, slight bullish lean
+    elif di_minus > di_plus and adx >= 25: score -= 8    # Strong bearish trend
+    elif di_minus > di_plus and adx >= 20: score -= 4    # Weak bearish trend: partial penalty
 
     if   sma55 > sma200: score += 8
     elif sma55 < sma200: score -= 4
+
+    # COMPONENT 4 — Oscillator confluence (+10 pts max)
+    # Stochastic: independent momentum confirmation (not redundant with RSI)
+    if   stoch_k > 50 and stoch_k > stoch_d: score += 5   # bullish K cross
+    elif stoch_k < 20:                        score -= 5   # oversold pressure
+
+    # RSI Divergence: confirmed divergence shifts bias despite price trend
+    if divergence:
+        div_lbl = divergence[0] if isinstance(divergence, tuple) else str(divergence)
+        if "Bullish Div" in div_lbl:   score += 5
+        elif "Bearish Div" in div_lbl: score -= 5
 
     return max(0, min(100, score))
 
@@ -577,6 +606,15 @@ def _r_squared(x, y):
     ss_res = np.sum((y - predicted) ** 2)
     ss_tot = np.sum((y - y.mean()) ** 2)
     return 1 - ss_res / (ss_tot + 1e-9)
+
+
+# ── Trendline confidence from R² — used by triangle + continuation patterns ───
+def _tl_conf(r2):
+    """Map R² of a fitted trendline to confidence tier (High / Medium / Low)."""
+    if r2 > 0.85: return "High"
+    if r2 > 0.70: return "Medium"
+    if r2 > 0.55: return "Low"
+    return None
 
 
 # ── RSI Divergence — swing-based (Fix 16) ─────────────────────────────────────
@@ -617,6 +655,28 @@ def _detect_rsi_divergence(df, lookback=60):
                 return ("Bullish Div.", "bull")
 
     return ("None", "neut")
+
+
+# ── Pattern Strength Tiers ────────────────────────────────────────────────────
+# Patterns are ranked by priority: lower number = higher structural significance.
+# When multiple patterns are detected on the same asset, the highest-priority
+# (lowest number) pattern wins; confidence (High > Medium > Low) is the tiebreaker.
+#
+# RATIONALE:
+#   Tier 0 — Reversal: strongest signal — identifies a likely trend change.
+#             Requires the most bars to form; highest false-positive cost.
+#   Tier 1 — Triangle: structural compression — imminent directional resolution.
+#             Direction ambiguous until breakout, hence below reversal.
+#   Tier 2 — Continuation: confirms existing trend only.
+#             Lowest conviction; trend could still fail.
+_PATTERN_TIERS = {
+    "Head & Shoulders":         0,  "Inverse Head & Shoulders": 0,
+    "Double Top":               0,  "Double Bottom":            0,
+    "Ascending Triangle":       1,  "Descending Triangle":      1,
+    "Rising Wedge":             2,  "Falling Wedge":            2,
+    "Rising Channel":           2,  "Falling Channel":          2,
+    "Bull Flag":                2,  "Bear Flag":                2,
+}
 
 
 # ── Chart Pattern Detection (Fix 13, 14, 15) ─────────────────────────────────
@@ -724,13 +784,6 @@ def _detect_chart_pattern(df, stats, asset_type="index"):
         r2_l = _r_squared(x, lows)
         r2_min = min(r2_h, r2_l)
 
-        def _tl_conf(r2):
-            """Trendline confidence from R²."""
-            if r2 > 0.85: return "High"
-            if r2 > 0.70: return "Medium"
-            if r2 > 0.55: return "Low"
-            return None
-
         highs_std_r = highs.std() / (highs.mean() + 1e-9)
         lows_std_r  = lows.std() / (lows.mean() + 1e-9)
 
@@ -774,13 +827,6 @@ def _detect_chart_pattern(df, stats, asset_type="index"):
         r2_h = _r_squared(x, highs)
         r2_l = _r_squared(x, lows)
         r2_min = min(r2_h, r2_l)
-
-        def _tl_conf(r2):
-            """Trendline confidence from R²."""
-            if r2 > 0.85: return "High"
-            if r2 > 0.70: return "Medium"
-            if r2 > 0.55: return "Low"
-            return None
 
         # Rising Wedge
         if (mh_slope > 0 and ml_slope > 0 and ml_slope > mh_slope * 1.2):
@@ -977,7 +1023,7 @@ def _compute_sr_levels(df, close, fibs, asset_type):
 
 # ── Market Structure Intelligence (Fix 18, 20) ───────────────────────────────
 
-def _compute_market_structure(df, stats):
+def _compute_market_structure(df, stats, divergence=None):
     """Compute market structure signals for the Intelligence Matrix."""
     c_arr  = df['close'].values.astype(float)
     close  = stats['last']
@@ -1057,8 +1103,9 @@ def _compute_market_structure(df, stats):
     mac21_cls = "bull" if "Bullish" in (ma_cross_21_55_lbl or "") or ">" in (ma_cross_21_55_lbl or "") else \
                 "bear" if "Bearish" in (ma_cross_21_55_lbl or "") or "<" in (ma_cross_21_55_lbl or "") else "neut"
 
-    # RSI Divergence — swing-based (Fix 16)
-    divergence = _detect_rsi_divergence(df)
+    # RSI Divergence — use pre-computed value from compute_stats() to avoid double computation
+    if divergence is None:
+        divergence = _detect_rsi_divergence(df)
 
     # Gap from SMAs
     gap55  = round((close / sma55  - 1) * 100, 2) if sma55  else 0
@@ -1192,12 +1239,17 @@ def compute_stats(df, name, asset_type="index"):
     res_scores = [r[1] for r in res_scored]
     sup_scores = [s[1] for s in sup_scored]
 
-    # Weighted bias score (Fix 12)
+    # Pre-compute divergence for both bias score and market structure (avoids double computation)
+    _divergence = _detect_rsi_divergence(df)
+
+    # Weighted bias score — includes oscillator confluence (divergence + stochastic)
     bias_score_raw = compute_bias_score(
         close, sma21, sma55, sma200,
         macd_v, mac_s, rsi_v,
         dip_v, din_v, adx_v,
-        price_roc_20
+        price_roc_20,
+        divergence=_divergence,
+        stoch_k=stk, stoch_d=std
     )
     bias_label = overall_bias(bias_score_raw)
 
@@ -1220,18 +1272,18 @@ def compute_stats(df, name, asset_type="index"):
         "low52_calc":  round(float(df_52["low"].min()),  4) if len(df_52) else None,
     }
 
-    # Market structure intelligence
+    # Market structure intelligence — pass pre-computed divergence to avoid recomputation
     ms = _compute_market_structure(df, {
         "last": round(close, 4), "sma21": round(sma21, 4),
         "sma55": round(sma55, 4), "sma200": round(sma200, 4),
         "adx_val": round(adx_v, 1), "rsi_val": round(rsi_v, 1),
         "bb_pct_val": round(bb_p, 2),
         "stoch_k": round(stk, 1), "stoch_d": round(std, 1),
-    })
+    }, divergence=_divergence)
 
     # Weekly indicators
     weekly = {}
-    for wk in ("w_rsi", "w_macd", "w_macd_sig", "w_bb_pct", "w_stoch_k", "w_stoch_d", "w_adx"):
+    for wk in ("w_rsi", "w_macd", "w_macd_sig", "w_bb_pct", "w_stoch_k", "w_stoch_d", "w_adx", "w_di_plus", "w_di_minus"):
         if wk in df.columns:
             val = df[wk].iloc[-1]
             weekly[wk] = float(val) if not (isinstance(val, float) and math.isnan(val)) else None
@@ -1248,7 +1300,11 @@ def compute_stats(df, name, asset_type="index"):
         },
         "ADX (14)":        {
             "daily":  adx_sig(adx_v, dip_v, din_v),
-            "weekly": adx_sig(_sf(weekly.get("w_adx"), 20), 50, 50) if weekly.get("w_adx") is not None else "N/A",
+            "weekly": (adx_sig(
+                           _sf(weekly.get("w_adx"),     20),
+                           _sf(weekly.get("w_di_plus"),  50),
+                           _sf(weekly.get("w_di_minus"), 50)
+                       ) if weekly.get("w_adx") is not None else "N/A"),
         },
         "Bollinger Bands": {
             "daily":  bb_sig(bb_p),
@@ -1286,7 +1342,7 @@ def compute_stats(df, name, asset_type="index"):
     }
 
 
-print("CELL 4 OK")
+print("CELL 4 OK \u2014 signals, stats, pattern + S/R functions loaded")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1295,12 +1351,6 @@ print("CELL 4 OK")
 
 def _accent_band(asset_type, report_date):
     """Generate decorative accent band HTML with inline SVG candlestick pattern."""
-    type_labels = {
-        "fx": "FX PAIR", "index": "EQUITY INDEX",
-        "commodity": "COMMODITY", "crypto": "CRYPTOCURRENCY",
-    }
-    type_lbl = type_labels.get(asset_type, "ASSET")
-
     # Generate inline SVG candlestick pattern (repeating ~64 candlesticks across 1280px)
     candles_svg = ""
     for i in range(64):
@@ -1319,10 +1369,9 @@ def _accent_band(asset_type, report_date):
 
     return (
         '<div class="accent-band">'
-        '<span class="band-type">' + type_lbl + '</span>'
-        '<svg class="band-svg-overlay" viewBox="0 0 1280 28" preserveAspectRatio="none">'
+        '<svg class="band-svg-overlay" viewBox="0 0 1280 28" preserveAspectRatio="none"'
+        ' style="width:100%">'
         + candles_svg + '</svg>'
-        '<span class="band-date">' + report_date + '</span>'
         '</div>'
     )
 
@@ -1385,31 +1434,6 @@ def make_chart_b64(df_full, name, stats, asset_type="index"):
 
     ax1.grid(axis="y", color="#e5e7eb", lw=0.5, zorder=0)
 
-    # ── Fibonacci dashed lines ────────────────────────────────────────────────
-    fib_map = [
-        ("fib_100",  "#6b7280", "100%"),
-        ("fib_78_6", "#059669", "78.6%"),
-        ("fib_61_8", "#92400e", "61.8%"),
-        ("fib_50",   "#7c3aed", "50%"),
-        ("fib_38_2", "#f97316", "38.2%"),
-        ("fib_23_6", "#2563eb", "23.6%"),
-        ("fib_0",    "#6b7280", "0%"),
-    ]
-    labeled_fib_vals = []
-
-    for col, color, label in fib_map:
-        if col not in df_plot.columns:
-            continue
-        val = _sf(df_plot[col].iloc[-1], None)
-        if val is None:
-            continue
-        ax1.axhline(val, color=color, lw=0.9, ls=(0, (6, 4)), alpha=0.70, zorder=2)
-        too_close = any(abs(val - prev) < price_range * 0.012 for prev in labeled_fib_vals)
-        if not too_close:
-            ax1.text(n + 1.0, val, label, color=color, fontsize=7.5,
-                     va="center", fontweight="bold", clip_on=False)
-            labeled_fib_vals.append(val)
-
     # ── Candlesticks ──────────────────────────────────────────────────────────
     cw = float(np.clip(260 / max(n, 1) * 0.65, 0.35, 0.80))
     BULL_COL = "#16a34a"
@@ -1463,23 +1487,8 @@ def make_chart_b64(df_full, name, stats, asset_type="index"):
         _draw_sma_triple(ax1, xs, df_plot["sma200"].values,
                          base_color="#0EA5E9", highlight_color="#BAE6FD", lw_main=2.0)
 
-    # ── R/S lines (subtle) ────────────────────────────────────────────────────
-    if stats:
-        for i, rv in enumerate(stats.get("resistances", [])[:3]):
-            if rv and not (isinstance(rv, float) and math.isnan(rv)):
-                rv = float(rv)
-                ax1.axhline(rv, color="#dc2626", lw=0.8, ls=(0, (4, 5)), alpha=0.38, zorder=2)
-                ax1.text(-3.5, rv, "R" + str(i + 1), color="#dc2626", fontsize=7,
-                         va="center", fontweight="bold", ha="right", clip_on=False)
-        for i, sv in enumerate(stats.get("supports", [])[:3]):
-            if sv and not (isinstance(sv, float) and math.isnan(sv)):
-                sv = float(sv)
-                ax1.axhline(sv, color="#16a34a", lw=0.8, ls=(0, (4, 5)), alpha=0.38, zorder=2)
-                ax1.text(-3.5, sv, "S" + str(i + 1), color="#16a34a", fontsize=7,
-                         va="center", fontweight="bold", ha="right", clip_on=False)
-
     # ── Title & legend ────────────────────────────────────────────────────────
-    ax1.set_title(name, fontsize=12, color="#6b7280", pad=6, loc="center")
+    ax1.set_title(name, fontsize=13, fontweight="heavy", color="#374151", pad=6, loc="center")
     legend_handles = [
         Line2D([0], [0], color="#a855f7", lw=1.4, label="SMA (21)"),
         Line2D([0], [0], color="#F97316", lw=2.5, label="SMA (55)"),
@@ -1489,7 +1498,7 @@ def make_chart_b64(df_full, name, stats, asset_type="index"):
                framealpha=0.90, edgecolor="#e5e7eb", fancybox=False)
 
     # ax1 axes styling
-    ax1.set_xlim(-6, n + 13)
+    ax1.set_xlim(-0.5, n + 8)
     ax1.set_ylim(lmin * 0.992, lmax * 1.008)
     ax1.yaxis.set_tick_params(labelsize=10, colors="#374151")
     ax1.tick_params(axis="x", bottom=False, labelbottom=False)
@@ -1501,12 +1510,14 @@ def make_chart_b64(df_full, name, stats, asset_type="index"):
 
     # ── RSI panel (label "RSI (9)" — Fix 23) ─────────────────────────────────
     rsi_vals = df_plot["rsi"].values.astype(float) if "rsi" in df_plot.columns else np.full(n, 50.0)
-    ax2.fill_between(xs, rsi_vals, 0, alpha=0.15, color="#7c3aed", zorder=1)
-    ax2.fill_between(xs, rsi_vals, 70, where=(rsi_vals >= 70),
+    _rsi_finite = np.isfinite(rsi_vals)
+    ax2.fill_between(xs, rsi_vals, 0, alpha=0.15, color="#7c3aed", zorder=1,
+                     where=_rsi_finite)
+    ax2.fill_between(xs, rsi_vals, 70, where=(rsi_vals >= 70) & _rsi_finite,
                      alpha=0.20, color="#ef4444", zorder=2, interpolate=True)
-    ax2.fill_between(xs, rsi_vals, 30, where=(rsi_vals <= 30),
+    ax2.fill_between(xs, rsi_vals, 30, where=(rsi_vals <= 30) & _rsi_finite,
                      alpha=0.20, color="#16a34a", zorder=2, interpolate=True)
-    ax2.plot(xs, rsi_vals, color="#7c3aed", lw=1.5, zorder=3)
+    ax2.plot(xs[_rsi_finite], rsi_vals[_rsi_finite], color="#7c3aed", lw=1.5, zorder=3)
     ax2.axhline(70, color="#ef4444", lw=0.9, ls=(0, (4, 3)), alpha=0.90, zorder=4)
     ax2.axhline(50, color="#d1d5db", lw=0.5, ls=":", alpha=0.80, zorder=4)
     ax2.axhline(30, color="#16a34a", lw=0.9, ls=(0, (4, 3)), alpha=0.90, zorder=4)
@@ -1518,7 +1529,7 @@ def make_chart_b64(df_full, name, stats, asset_type="index"):
     # RSI panel label
     ax2.set_ylabel("RSI (9)", fontsize=9, color="#6b7280", labelpad=8)
 
-    ax2.set_xlim(-6, n + 13)
+    ax2.set_xlim(-0.5, n + 8)
     ax2.set_ylim(0, 100)
     ax2.set_yticks([30, 50, 70])
     ax2.set_yticklabels(["30", "50", "70"], fontsize=10, color="#374151")
@@ -1533,7 +1544,7 @@ def make_chart_b64(df_full, name, stats, asset_type="index"):
     mt_positions = [x for x, _ in month_ticks]
     mt_labels    = [lbl for _, lbl in month_ticks]
     ax2.set_xticks(mt_positions, minor=False)
-    ax2.set_xticklabels(mt_labels, fontsize=8, color="#6b7280", ha="center")
+    ax2.set_xticklabels(mt_labels, fontsize=9, color="#374151", ha="center", fontweight="semibold")
     ax2.tick_params(axis="x", which="major", length=4, width=0.8, color="#9ca3af", pad=3)
 
     # ── Encode to base64 PNG @ 160 DPI (Fix 22) ──────────────────────────────
@@ -1559,10 +1570,27 @@ run_log = {
     "summary": {},
 }
 
+def _log_asset_failure(key, meta, e, elapsed, exc_kind, print_traceback=False):
+    """Write failure records to run_log and report_data; print status line."""
+    print(f"    FAILED ({exc_kind}): {e}")
+    if print_traceback:
+        traceback.print_exc()
+    run_log["assets"][key] = {
+        "status": "failed", "rows_fetched": 0,
+        "bias": "", "pattern": "", "pattern_confidence": "",
+        "data_warnings": [], "error": str(e),
+        "runtime_seconds": elapsed,
+    }
+    report_data[key] = {
+        "meta": meta, "stats": None, "chart_b64": None,
+        "data_warnings": [], "error": str(e),
+    }
+
+
 report_data = {}
 for _k, _m in ASSETS.items():
     _t0 = time.time()
-    print("  " + _m["name"] + " ...")
+    print(f"  {_m['name']} ...")
     try:
         # 1. Fetch with retry
         _raw = fetch_ohlcv(_m["ticker"])
@@ -1630,48 +1658,13 @@ for _k, _m in ASSETS.items():
               f"  {_elapsed}s")
 
     except BQLFetchError as _e:
-        _elapsed = round(time.time() - _t0, 1)
-        print(f"    FAILED (BQLFetchError): {_e}")
-        run_log["assets"][_k] = {
-            "status": "failed", "rows_fetched": 0,
-            "bias": "", "pattern": "", "pattern_confidence": "",
-            "data_warnings": [], "error": str(_e),
-            "runtime_seconds": _elapsed,
-        }
-        # Insert warning slide placeholder
-        report_data[_k] = {
-            "meta": _m, "stats": None, "chart_b64": None,
-            "data_warnings": [], "error": str(_e),
-        }
+        _log_asset_failure(_k, _m, _e, round(time.time() - _t0, 1), "BQLFetchError")
 
     except DataValidationError as _e:
-        _elapsed = round(time.time() - _t0, 1)
-        print(f"    FAILED (DataValidationError): {_e}")
-        run_log["assets"][_k] = {
-            "status": "failed", "rows_fetched": 0,
-            "bias": "", "pattern": "", "pattern_confidence": "",
-            "data_warnings": [], "error": str(_e),
-            "runtime_seconds": _elapsed,
-        }
-        report_data[_k] = {
-            "meta": _m, "stats": None, "chart_b64": None,
-            "data_warnings": [], "error": str(_e),
-        }
+        _log_asset_failure(_k, _m, _e, round(time.time() - _t0, 1), "DataValidationError")
 
     except Exception as _e:
-        _elapsed = round(time.time() - _t0, 1)
-        print(f"    FAILED (Exception): {_e}")
-        traceback.print_exc()
-        run_log["assets"][_k] = {
-            "status": "failed", "rows_fetched": 0,
-            "bias": "", "pattern": "", "pattern_confidence": "",
-            "data_warnings": [], "error": str(_e),
-            "runtime_seconds": _elapsed,
-        }
-        report_data[_k] = {
-            "meta": _m, "stats": None, "chart_b64": None,
-            "data_warnings": [], "error": str(_e),
-        }
+        _log_asset_failure(_k, _m, _e, round(time.time() - _t0, 1), "Exception", print_traceback=True)
 
 # Print summary table
 print("\n" + "=" * 60)
@@ -1686,12 +1679,9 @@ print(f"CELL 6 OK — {sum(1 for v in report_data.values() if v.get('stats'))}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# CELL 7A — Claude API Integration (NEW)
+# CELL 7A — Claude API Integration
 # ═══════════════════════════════════════════════════════════════════════════════
-
-CLAUDE_API_KEY = ""
-CLAUDE_MODEL   = "claude-sonnet-4-6"
-CLAUDE_TEMP    = 0.3
+# CLAUDE_API_KEY / CLAUDE_MODEL / CLAUDE_TEMP are defined in Cell 2 (config section).
 
 _CLAUDE_SYSTEM = (
     "You are the institutional TA narrator for Alpha Bank Cross Asset Technical Vista.\n"
@@ -1875,6 +1865,7 @@ def _template_prose_fallback(brief):
 
 # ── Execute: populate claude_prose dict ───────────────────────────────────────
 claude_prose = {}
+_t7a_start = time.time()
 
 for _k, _a in report_data.items():
     if _a.get("stats") is None:
@@ -1908,7 +1899,11 @@ for _k, _a in report_data.items():
         run_log["assets"][_k]["prose_source"]   = "template"
         run_log["assets"][_k]["prose_warnings"] = []
 
-print("CELL 7A OK - prose generated for " + str(len(claude_prose)) + " assets")
+_n_claude   = sum(1 for v in run_log["assets"].values() if v.get("prose_source") == "claude")
+_n_template = sum(1 for v in run_log["assets"].values() if v.get("prose_source") in ("template", "fallback"))
+print(f"CELL 7A OK \u2014 prose generated for {len(claude_prose)} assets"
+      f"  (Claude: {_n_claude}  template: {_n_template})"
+      f"  {round(time.time() - _t7a_start, 1)}s")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1971,12 +1966,6 @@ def _badge(sig):
     """Render a sentiment badge span."""
     c = _SIG_CLASS.get(sig, "sb-neut")
     return '<span class="sentiment-badge ' + c + '">' + sig + "</span>"
-
-def _fmt(v, d=4):
-    """Format numeric value to d decimal places (HTML safe)."""
-    if v is None: return "\u2014"
-    try: return "{:,.{}f}".format(float(v), d)
-    except: return str(v)
 
 def _pct(v):
     """Format percentage with sign."""
@@ -2200,15 +2189,14 @@ def _page1(key, asset, pnum):
             "<span" + vc + ">" + val + "</span></span>"
         )
 
+    _roc = s.get("price_roc_20", 0) or 0
     pills = (
         pill("Last",    _fmt(s["last"]))
         + pill("MTD",   _pct(s["mtd"]),  mc)
         + pill("YTD",   _pct(s["ytd"]),  yc)
         + pill("12M",   _pct(s["12m"]),  m12c)
+        + pill("ROC(20)", _pct(_roc), "#15803d" if _roc >= 0 else "#b91c1c")
         + pill("RSI (9)", str(s["rsi_val"]))
-        + pill("Bias",  s["overall_bias"],
-               "#15803d" if "Bullish" in s["overall_bias"] else
-               "#b91c1c" if "Bearish" in s["overall_bias"] else "#92400e")
     )
 
     chart_img = (
@@ -2249,6 +2237,44 @@ def _page1(key, asset, pnum):
     )
 
 
+# ── Fibonacci key levels table for S/R panel ──────────────────────────────────
+def _fib_table_html(s):
+    """Compact Fibonacci level band (61.8%, 50%, 38.2%) for the S/R panel on Page 2."""
+    fibs  = s.get("fib_levels", {})
+    close = s.get("last", 0) or 1
+    if not fibs:
+        return ""
+    key_levels = [
+        ("61.8%", fibs.get("61.8%"), "#92400e"),
+        ("50%",   fibs.get("50%"),   "#7c3aed"),
+        ("38.2%", fibs.get("38.2%"), "#f97316"),
+    ]
+    rows_html = ""
+    for lbl, val, col in key_levels:
+        if val is None:
+            continue
+        rel     = round((float(val) / close - 1) * 100, 2)
+        rel_str = ("+" if rel >= 0 else "") + f"{rel:.2f}%"
+        rel_col = "#15803d" if rel >= 0 else "#b91c1c"
+        rows_html += (
+            f'<tr>'
+            f'<td style="padding:1px 5px;font-size:9.5px;color:{col};font-weight:700">{lbl}</td>'
+            f'<td style="padding:1px 5px;font-size:9.5px;text-align:right;font-weight:600">{_fmt(val)}</td>'
+            f'<td style="padding:1px 5px;font-size:9.5px;text-align:right;color:{rel_col}">{rel_str}</td>'
+            f'</tr>'
+        )
+    if not rows_html:
+        return ""
+    return (
+        '<div style="margin-top:4px;border-top:1px solid #e5e7eb;padding-top:3px">'
+        '<p style="font-size:9px;font-weight:700;color:#6b7280;text-transform:uppercase;'
+        'letter-spacing:.04em;margin-bottom:2px">Key Fib Levels</p>'
+        '<table style="width:100%;border-collapse:collapse">'
+        + rows_html +
+        '</table></div>'
+    )
+
+
 # ── Page 2 ────────────────────────────────────────────────────────────────────
 def _page2(key, asset, pnum):
     """Render Page 2 slide — indicator matrix + S/R levels + pattern + outlook."""
@@ -2274,32 +2300,30 @@ def _page2(key, asset, pnum):
             "</tr>"
         )
 
-    # Resistance rows with strength dots (Fix 32)
+    # Resistance rows — always render 3, show "—" for None
     res_rows = ""
-    for i, r in enumerate(s["resistances"]):
-        if r is None:
-            continue
-        score = s.get("resistance_scores", [None, None, None])[i] if i < len(s.get("resistance_scores", [])) else None
-        dots  = _strength_dots(score)
+    _ress = list(s["resistances"]) + [None, None, None]
+    for i in range(3):
+        r = _ress[i]
+        val_str = _fmt(r) if r is not None else "&mdash;"
         res_rows += (
             '<div class="level-item level-res">'
             '<span>R' + str(i + 1) + ":</span>"
-            '<span class="lv">' + _fmt(r) + "</span>"
-            + dots + "</div>"
+            '<span class="lv">' + val_str + "</span>"
+            "</div>"
         )
 
-    # Support rows with strength dots (Fix 32)
+    # Support rows — always render 3, show "—" for None
     sup_rows = ""
-    for i, sv in enumerate(s["supports"]):
-        if sv is None:
-            continue
-        score = s.get("support_scores", [None, None, None])[i] if i < len(s.get("support_scores", [])) else None
-        dots  = _strength_dots(score)
+    _sups = list(s["supports"]) + [None, None, None]
+    for i in range(3):
+        sv = _sups[i]
+        val_str = _fmt(sv) if sv is not None else "&mdash;"
         sup_rows += (
             '<div class="level-item level-sup">'
             '<span>S' + str(i + 1) + ":</span>"
-            '<span class="lv">' + _fmt(sv) + "</span>"
-            + dots + "</div>"
+            '<span class="lv">' + val_str + "</span>"
+            "</div>"
         )
 
     # Pattern text from prose
@@ -2309,32 +2333,28 @@ def _page2(key, asset, pnum):
         pat_text = ("Pattern: <strong>" + s["pattern"] + "</strong> (" + pconf + " confidence). "
                     "RSI(9) at " + str(s["rsi_val"]) + ", ADX at " + str(s["adx_val"]) + ".")
 
-    # Total Outlook — from prose or computed (Fix 33: no conviction bar)
+    # Total Outlook — from prose or shared template fallback
     outlook = prose.get("outlook", "")
     if not outlook:
-        r1    = _fmt(s["resistances"][0])
-        s1fmt = _fmt(s["supports"][0])
-        sma55v = _fmt(s["sma55"])
-        if bias == "Bullish":
-            outlook = ("The technical picture remains constructive. Price holds above key moving "
-                       "averages and momentum is supportive. A sustained push above " + r1 + " reinforces "
-                       "the bullish case; failure to hold " + s1fmt + " warrants caution.")
-        elif bias == "Mildly Bullish":
-            outlook = ("Conditions are cautiously positive. Watch " + r1 + " as the next hurdle "
-                       "and " + s1fmt + " as the key support to defend on near-term weakness.")
-        elif bias == "Neutral":
-            outlook = ("The asset is range-bound. A clean closing break above " + r1 + " or below "
-                       + s1fmt + " will define the next meaningful directional move.")
-        elif bias == "Mildly Bearish":
-            outlook = (s1fmt + " is the critical support to defend \u2014 a breach would extend "
-                       "the corrective move. Resistance at " + r1 + " caps any recovery attempt.")
-        else:
-            outlook = ("Technical indicators are broadly aligned lower. Rallies toward " + r1
-                       + " are likely to face selling pressure. Monitor for reversal confirmation "
-                       "before reassessing the directional stance.")
+        ms = s.get("market_structure", {})
+        _fb = _template_prose_fallback({
+            "asset_name": name, "asset_type": asset["meta"]["type"],
+            "bias": bias,
+            "last": s["last"], "sma55": s["sma55"], "sma200": s["sma200"],
+            "rsi": s["rsi_val"], "adx": s["adx_val"],
+            "R1": s["resistances"][0] if s["resistances"] else None,
+            "S1": s["supports"][0] if s["supports"] else None,
+            "pattern": s["pattern"],
+            "pattern_confidence": s.get("pattern_confidence", "Medium"),
+            "trend_phase": ms.get("trend_phase", ("Transition",))[0] if ms.get("trend_phase") else "Transition",
+            "divergence": ms.get("divergence", ("None",))[0] if ms.get("divergence") else "None",
+            "ma_cross_55_200": ms.get("ma_cross_55_200", ("",))[0] if ms.get("ma_cross_55_200") else "",
+            "report_date": REPORT_DATE,
+        })
+        outlook = _fb.get("outlook", "")
 
     return (
-        '<div class="slide-content hidden" id="s-' + key + '-2">'
+        '<div class="slide-content" id="s-' + key + '-2">'
         '<div class="p2-hdr">'
         '<h1 class="slide-title">' + name + ": Technical Analysis Summary</h1>"
         "<div>" + _get_logo("dark", "40px") + "</div>"
@@ -2377,21 +2397,18 @@ def _page2(key, asset, pnum):
 
         '<div class="ibox box-lvl">'
         '<h3>Key Resistance &amp; Support Levels</h3>'
+        '<p style="font-size:9px;color:#9ca3af;margin-bottom:3px;font-style:italic">'
+        '\u25cf strength: Fib weight + swing + round number + proximity + confluence</p>'
         '<div class="lvl-sec">'
         '<p class="lvl-title res-title">RESISTANCE</p>' + res_rows + "</div>"
         '<div class="lvl-sec" style="border-top:1px solid #d1d5db;padding-top:4px">'
         '<p class="lvl-title sup-title">SUPPORT</p>' + sup_rows + "</div>"
+        + _fib_table_html(s) +
         "</div>"
 
-        # Total Outlook — bias badge + sentiment + outlook (Fix 33: no conviction bar)
+        # Total Outlook — plain text, no header badge
         '<div class="ibox box-outlook">'
         "<h3>Total Outlook</h3>"
-        '<div style="padding-bottom:5px;border-bottom:1px solid #e2e8f0;margin-bottom:5px">'
-        + _badge(bias)
-        + '<span style="font-size:11.5px;font-weight:600;color:#334155;'
-        'letter-spacing:.01em;margin-left:6px">'
-        + _sentiment_phrase(bias) + "</span>"
-        "</div>"
         '<p class="dtext">' + outlook + "</p>"
         "</div>"
 
@@ -2427,28 +2444,128 @@ def _warning_slide(key, asset, pnum):
 
 # ── Cover ─────────────────────────────────────────────────────────────────────
 def _cover():
-    """Render cover slide."""
+    """Render cover slide — white background, bank-style design."""
     names = " &middot; ".join(a["meta"]["name"] for a in report_data.values())
+
+    # Bank-style inline SVG illustrations
+    _gear = (
+        '<svg width="72" height="72" viewBox="0 0 72 72" fill="none" '
+        'xmlns="http://www.w3.org/2000/svg">'
+        '<circle cx="36" cy="36" r="20" stroke="#11366B" stroke-width="2"/>'
+        '<circle cx="36" cy="36" r="10" stroke="#11366B" stroke-width="1.5"/>'
+        '<rect x="33" y="10" width="6" height="9" rx="1.5" fill="#11366B" opacity="0.65"/>'
+        '<rect x="33" y="53" width="6" height="9" rx="1.5" fill="#11366B" opacity="0.65"/>'
+        '<rect x="10" y="33" width="9" height="6" rx="1.5" fill="#11366B" opacity="0.65"/>'
+        '<rect x="53" y="33" width="9" height="6" rx="1.5" fill="#11366B" opacity="0.65"/>'
+        '<rect x="18" y="14" width="6" height="9" rx="1.5" fill="#11366B" opacity="0.5"'
+        ' transform="rotate(45 21 18.5)"/>'
+        '<rect x="48" y="14" width="6" height="9" rx="1.5" fill="#11366B" opacity="0.5"'
+        ' transform="rotate(-45 51 18.5)"/>'
+        '<rect x="18" y="49" width="6" height="9" rx="1.5" fill="#11366B" opacity="0.5"'
+        ' transform="rotate(-45 21 53.5)"/>'
+        '<rect x="48" y="49" width="6" height="9" rx="1.5" fill="#11366B" opacity="0.5"'
+        ' transform="rotate(45 51 53.5)"/>'
+        '</svg>'
+    )
+    _compass = (
+        '<svg width="72" height="72" viewBox="0 0 72 72" fill="none" '
+        'xmlns="http://www.w3.org/2000/svg">'
+        '<circle cx="36" cy="36" r="30" stroke="#11366B" stroke-width="2"/>'
+        '<circle cx="36" cy="36" r="3" fill="#11366B"/>'
+        '<line x1="36" y1="6" x2="36" y2="16" stroke="#11366B" stroke-width="1.5"/>'
+        '<line x1="36" y1="56" x2="36" y2="66" stroke="#11366B" stroke-width="1.5"/>'
+        '<line x1="6" y1="36" x2="16" y2="36" stroke="#11366B" stroke-width="1.5"/>'
+        '<line x1="56" y1="36" x2="66" y2="36" stroke="#11366B" stroke-width="1.5"/>'
+        '<polygon points="36,12 39,36 36,32 33,36" fill="#11366B"/>'
+        '<polygon points="36,60 39,36 36,40 33,36" fill="none" stroke="#11366B" stroke-width="1.5"/>'
+        '<text x="32" y="24" font-size="9" fill="#11366B" font-weight="bold" '
+        'font-family="Arial,sans-serif">N</text>'
+        '</svg>'
+    )
+    _pencil = (
+        '<svg width="72" height="72" viewBox="0 0 72 72" fill="none" '
+        'xmlns="http://www.w3.org/2000/svg">'
+        '<polygon points="22,8 50,8 50,56 22,56" stroke="#11366B" stroke-width="2" '
+        'stroke-linejoin="round" transform="rotate(-15 36 32)"/>'
+        '<polygon points="22,56 36,68 50,56" stroke="#11366B" stroke-width="2" '
+        'stroke-linejoin="round" fill="#11366B" opacity="0.5" transform="rotate(-15 36 62)"/>'
+        '<line x1="28" y1="22" x2="44" y2="22" stroke="#11366B" stroke-width="1.5" '
+        'transform="rotate(-15 36 22)"/>'
+        '<line x1="28" y1="30" x2="44" y2="30" stroke="#11366B" stroke-width="1.5" '
+        'transform="rotate(-15 36 30)"/>'
+        '<line x1="28" y1="38" x2="40" y2="38" stroke="#11366B" stroke-width="1.5" '
+        'transform="rotate(-15 36 38)"/>'
+        '</svg>'
+    )
+
     return (
         '<div class="slide-content cover-slide" id="s-cover">'
+        '<div style="position:absolute;top:32px;right:40px">'
+        + _get_logo("dark", "90px") +
+        "</div>"
         '<div class="cover-inner">'
-        '<div style="margin-bottom:30px">' + _get_logo("cover-corner", "46px") + "</div>"
-        '<div style="width:50px;height:2px;background:rgba(255,255,255,0.4);margin-bottom:18px"></div>'
+        '<div style="width:50px;height:3px;background:#11366B;margin-bottom:18px"></div>'
         '<div style="font-size:11px;letter-spacing:.16em;text-transform:uppercase;'
-        'color:rgba(255,255,255,0.65);margin-bottom:11px;font-weight:500">'
+        'color:#6b7280;margin-bottom:11px;font-weight:600">'
         "Global Markets Analysis</div>"
         "<h1 style=\"font-family:Georgia,'Times New Roman',serif;font-size:50px;"
-        'font-weight:700;color:white;line-height:1.1;margin-bottom:18px">'
+        'font-weight:700;color:#11366B;line-height:1.1;margin-bottom:16px">'
         "Cross Asset<br>Technical Vista</h1>"
-        '<div style="font-size:15px;color:rgba(255,255,255,0.75);font-weight:400;'
-        'letter-spacing:.02em;margin-bottom:22px">' + REPORT_DATE + "</div>"
-        '<div style="width:50px;height:2px;background:rgba(255,255,255,0.4);margin-bottom:14px"></div>'
-        '<p style="font-size:11.5px;color:rgba(255,255,255,0.6);line-height:1.9">' + names + "</p>"
+        '<div style="font-size:15px;color:#4b5563;font-weight:400;'
+        'letter-spacing:.02em;margin-bottom:28px">' + REPORT_DATE + "</div>"
+        '<div style="display:flex;gap:36px;margin-bottom:28px">'
+        + _gear + _compass + _pencil +
         "</div>"
-        '<div class="cover-footer">'
-        "<span>For professional investors only &mdash; Not for public distribution</span>"
-        "<span>Alpha Bank Group &mdash; Global Markets Analysis</span>"
+        '<div style="width:50px;height:3px;background:#11366B;margin-bottom:14px"></div>'
+        '<p style="font-size:11.5px;color:#6b7280;line-height:1.9">' + names + "</p>"
         "</div></div>"
+    )
+
+
+def _summary_slide(pnum):
+    """Render final summary slide — one row per asset with bias + outlook sentence."""
+    rows = ""
+    for _k, _a in report_data.items():
+        _s    = _a.get("stats") or {}
+        _p    = claude_prose.get(_k, {})
+        _bias = _s.get("overall_bias", "N/A")
+        _bc   = "#15803d" if "Bullish" in _bias else "#b91c1c" if "Bearish" in _bias else "#92400e"
+        _name = ASSETS[_k]["name"] if isinstance(ASSETS.get(_k), dict) else _a["meta"]["name"]
+        _out  = (_p.get("outlook") or
+                 f"{_bias}. {_s.get('pattern', 'No pattern detected')} detected.")
+        rows += (
+            f'<tr>'
+            f'<td style="font-weight:700;padding:5px 10px;white-space:nowrap;font-size:12px">'
+            f'{_name}</td>'
+            f'<td style="padding:5px 10px">'
+            f'<span style="color:{_bc};font-weight:600;font-size:12px">{_bias}</span></td>'
+            f'<td style="padding:5px 10px;font-size:11.5px;line-height:1.4">{_out}</td>'
+            f'</tr>'
+        )
+    table = (
+        '<table style="width:100%;border-collapse:collapse">'
+        '<thead><tr style="background:#11366B">'
+        '<th style="text-align:left;padding:7px 10px;color:white;font-size:11px;width:110px">'
+        'Asset</th>'
+        '<th style="text-align:left;padding:7px 10px;color:white;font-size:11px;width:150px">'
+        'Bias</th>'
+        '<th style="text-align:left;padding:7px 10px;color:white;font-size:11px">'
+        'Outlook Summary</th>'
+        '</tr></thead>'
+        '<tbody>' + rows + '</tbody>'
+        '</table>'
+    )
+    return (
+        '<div class="slide-content" id="s-summary">'
+        '<div class="p2-hdr">'
+        f'<h1 class="slide-title">Cross-Asset Outlook Summary \u2014 {REPORT_DATE}</h1>'
+        '<div>' + _get_logo("dark", "40px") + '</div>'
+        '</div>'
+        '<div class="divider"></div>'
+        '<div style="flex:1;min-height:0;overflow:hidden;padding:8px 0">'
+        + table +
+        '</div>'
+        + _footer(pnum) + '</div>'
     )
 
 
@@ -2466,6 +2583,8 @@ for _k, _a in report_data.items():
     else:
         _slides.append(_page1(_k, _a, _pnum)); _ids.append("s-" + _k + "-1"); _pnum += 1
         _slides.append(_page2(_k, _a, _pnum)); _ids.append("s-" + _k + "-2"); _pnum += 1
+
+_slides.append(_summary_slide(_pnum)); _ids.append("s-summary"); _pnum += 1
 
 _slides_html = "\n".join(_slides)
 _ids_js      = json.dumps(_ids)
@@ -2488,26 +2607,6 @@ body {
   padding: 20px;
 }
 .container { max-width: 1400px; margin: 0 auto; }
-
-/* Navigation */
-.navigation {
-  display: flex; justify-content: space-between; align-items: center;
-  margin-bottom: 20px; background: white;
-  padding: 13px 20px; border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0,0,0,.1);
-}
-.nav-btn {
-  padding: 7px 18px; background: white; border: 1px solid #d1d5db;
-  border-radius: 6px; cursor: pointer; font-size: 13px;
-  font-family: inherit; transition: box-shadow .15s;
-}
-.nav-btn:hover:not(:disabled) { box-shadow: 0 3px 6px rgba(0,0,0,.1); }
-.nav-btn:disabled { opacity: .4; cursor: not-allowed; }
-.nav-info { display: flex; align-items: center; gap: 14px; }
-.nav-sel {
-  padding: 7px 14px; border: 1px solid #d1d5db; border-radius: 6px;
-  font-size: 13px; font-family: inherit;
-}
 
 /* Slide wrapper — 1280x720 fixed */
 .slide-container {
@@ -2641,80 +2740,16 @@ td { padding: 1px 6px; font-size: 10.5px; border-bottom: 1px solid #e5e7eb; }
 
 /* Cover */
 .cover-slide {
-  background: #0d2d6e !important;
-  justify-content: space-between !important;
+  background: #ffffff !important;
+  position: relative !important;
+  justify-content: center !important;
   padding: 0 !important;
 }
 .cover-inner {
   flex: 1; display: flex; flex-direction: column;
   align-items: flex-start; justify-content: center; padding: 52px 64px;
 }
-.cover-footer {
-  display: flex; justify-content: space-between; padding: 12px 64px;
-  border-top: 1px solid rgba(255,255,255,.1);
-  font-size: 10.5px; color: rgba(255,255,255,.55);
-}
-
-/* Page dots */
-.page-indicators {
-  display: flex; justify-content: center; gap: 8px; margin-top: 16px;
-}
-.page-dot {
-  width: 12px; height: 12px; border-radius: 50%;
-  border: none; cursor: pointer; transition: background .15s;
-}
-.page-dot.active       { background: #2563eb; }
-.page-dot:not(.active) { background: #d1d5db; }
-
-.hidden { display: none !important; }
-
-/* Print */
-@media print {
-  body { background: white; padding: 0; }
-  .navigation, .page-indicators { display: none !important; }
-  .slide-container { box-shadow: none; width: 100%; height: auto; }
-  .slide-content {
-    display: flex !important; page-break-after: always; break-after: page;
-    width: 100%; height: 100vh; padding: 20px 28px 12px;
-  }
-  .hidden { display: flex !important; }
-}
 """
-
-_JS = (
-    "const S=" + _ids_js + ";\n"
-    "const A=" + _assets_js + ";\n"
-    "let _i=0;\n"
-    "const sel=document.getElementById('asel');\n"
-    "A.forEach((a,i)=>{ const o=document.createElement('option'); o.value=i;"
-    " o.textContent=a.name; sel.appendChild(o); });\n"
-
-    "function go(i){\n"
-    "  document.querySelectorAll('.slide-content').forEach(s=>s.classList.add('hidden'));\n"
-    "  const el=document.getElementById(S[i]); if(el) el.classList.remove('hidden');\n"
-    "  _i=i;\n"
-    "  const pg=i===0?0:(i%2===1?1:2);\n"
-    "  const ai=i===0?0:Math.ceil(i/2)-1;\n"
-    "  document.getElementById('dot1').classList.toggle('active',pg===1);\n"
-    "  document.getElementById('dot2').classList.toggle('active',pg===2);\n"
-    "  sel.value=i===0?0:ai;\n"
-    "  const nm=i===0?'Cover':(i%2===1?'Asset '+(ai+1)+'/'+A.length+' \u2014 Chart':'Asset '+(ai+1)+'/'+A.length+' \u2014 Summary');\n"
-    "  document.getElementById('pinfo').textContent='Slide '+(i+1)+'/'+S.length+' \u2014 '+nm;\n"
-    "  document.getElementById('pb').disabled=i===0;\n"
-    "  document.getElementById('pn').disabled=i===S.length-1;\n"
-    "}\n"
-
-    "function prev(){ if(_i>0) go(_i-1); }\n"
-    "function next(){ if(_i<S.length-1) go(_i+1); }\n"
-    "function switchPage(p){ if(_i===0) return; go(Math.ceil(_i/2)*2-2+p); }\n"
-    "function chAsset(){ go(parseInt(sel.value)*2+1); }\n"
-
-    "document.addEventListener('keydown',e=>{\n"
-    "  if(e.key==='ArrowRight'||e.key==='ArrowDown') next();\n"
-    "  if(e.key==='ArrowLeft' ||e.key==='ArrowUp')   prev();\n"
-    "});\n"
-    "go(0);\n"
-)
 
 # ── Versioned filename (Fix 39) ────────────────────────────────────────────────
 _base_fn = "Alpha_Bank_TA_Report_" + TODAY.strftime("%Y%m") + ".html"
@@ -2735,25 +2770,10 @@ _HTML = (
     "</head>\n<body>\n"
     "<div class=\"container\">\n"
 
-    "<div class=\"navigation\">\n"
-    "  <button class=\"nav-btn\" id=\"pb\" onclick=\"prev()\">&#8592; Previous</button>\n"
-    "  <div class=\"nav-info\">\n"
-    "    <span id=\"pinfo\" style=\"font-size:13px;font-weight:500;color:#6b7280\"></span>\n"
-    "    <select class=\"nav-sel\" id=\"asel\" onchange=\"chAsset()\"></select>\n"
-    "  </div>\n"
-    "  <button class=\"nav-btn\" id=\"pn\" onclick=\"next()\">Next &#8594;</button>\n"
-    "</div>\n"
-
     "<div class=\"slide-container\">\n"
     + _slides_html
     + "\n</div>\n"
-
-    "<div class=\"page-indicators\">\n"
-    "  <button class=\"page-dot\" id=\"dot1\" onclick=\"switchPage(1)\"></button>\n"
-    "  <button class=\"page-dot\" id=\"dot2\" onclick=\"switchPage(2)\"></button>\n"
     "</div>\n"
-    "</div>\n"
-    "<script>\n" + _JS + "\n</script>\n"
     "</body>\n</html>\n"
 )
 
@@ -2801,17 +2821,17 @@ _log_fn = "TA_Report_RunLog_" + TODAY.strftime("%Y%m") + ".json"
 with open(_log_fn, "w", encoding="utf-8") as _lf:
     json.dump(run_log, _lf, indent=2, default=str)
 
-print("Run log saved: " + _log_fn)
+print(f"Run log saved: {_log_fn}")
 print("")
 print("=" * 60)
-print("CELL 8 OK \u2014 Report generation complete")
-print("  Output : " + _out_path)
-print("  Size   : " + str(_sz_kb) + " KB")
-print("  Slides : " + str(len(_ids)) + " (" + str(_n_ok) + " assets OK, " + str(_n_failed) + " failed)")
-print("  Runtime: " + str(round(_total_rt, 1)) + "s")
+print(f"CELL 8 OK \u2014 Report generation complete")
+print(f"  Output : {_out_path}")
+print(f"  Size   : {_sz_kb} KB")
+print(f"  Slides : {len(_ids)} ({_n_ok} assets OK, {_n_failed} failed)")
+print(f"  Runtime: {round(_total_rt, 1)}s")
 print("=" * 60)
 print("")
 print("NEXT STEPS:")
-print("  1. Download " + _base_fn + " from BQuant file browser")
+print(f"  1. Download {_base_fn} from BQuant file browser")
 print("  2. Open in Chrome / Edge")
 print("  3. Ctrl+P \u2192 Save as PDF (if WeasyPrint unavailable)")
