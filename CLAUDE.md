@@ -37,7 +37,7 @@ python -m py_compile ta_report_final.py
 Execute the file top-to-bottom in a BQuant notebook. Each cell prints `CELL N OK` on success.
 
 **Claude API prose (optional):**
-Set `CLAUDE_API_KEY` in Cell 7A before running. Leave empty to use the deterministic template fallback.
+Set `CLAUDE_API_KEY` in Cell 2 (config block) before running. Leave empty to use the deterministic template fallback.
 
 **Output files written to the current working directory:**
 - `Alpha_Bank_TA_Report_YYYYMM[_vN].html` — interactive HTML deck
@@ -56,8 +56,8 @@ The file is structured as 9 sequential cells, each building on the previous:
 | 4 | Signal helpers, `compute_bias_score()`, `_detect_chart_pattern()`, `_compute_sr_levels()`, `_compute_market_structure()`, `compute_stats()` |
 | 5 | `make_chart_b64()` — 1-year daily matplotlib chart → Base64 PNG; `_accent_band()` |
 | 6 | Main loop over 9 assets; per-asset exception handling; `run_log` dict |
-| 7A | Claude API integration: `build_claude_brief()` → `_call_claude()` → `_validate_claude_output()`; `_template_prose_fallback()` fallback; populates `claude_prose` dict |
-| 7 | HTML builders: `_page1()`, `_page2()`, `_warning_slide()`, `_cover()`, `_perf_scorecard_html()`, `_market_structure_html()` |
+| 7A | Claude API integration: `build_claude_brief()` → `_call_claude()` → `_validate_claude_output()`; `_template_prose_fallback()` fallback (bias+phase-aware narrative titles, 4-sentence outlooks); populates `claude_prose` dict |
+| 7 | HTML builders: `_page1()`, `_page2()`, `_warning_slide()`, `_cover()`, `_perf_scorecard_html()`, `_market_structure_html()`, `_build_summary_text()`, `_summary_slide()` |
 | 8 | CSS + JS assembly; versioned filename; WeasyPrint PDF; smoke tests; run log JSON write |
 
 **Data flow:**
@@ -160,8 +160,28 @@ Failed assets produce a `_warning_slide()` placeholder and are logged in `run_lo
 
 ## Claude API (Cell 7A)
 
-- Set `CLAUDE_API_KEY = ""` → template fallback (no API call)
+- `CLAUDE_API_KEY` lives in **Cell 2** (config block) — set it there before running
+- Set `CLAUDE_API_KEY = ""` → `_template_prose_fallback()` deterministic fallback (no API call)
 - `_call_claude()` returns a dict with exactly: `title`, `bullet1`, `bullet2`, `bullet3`, `pattern_text`, `outlook`
 - `_validate_claude_output()` checks for bias contradictions only (does not reject on warnings)
 - `claude_prose[key]` is consumed by `_page1()` and `_page2()` in Cell 7
 - `run_log["assets"][key]["prose_source"]` records `"claude"` / `"fallback"` / `"template"` / `"skip"`
+
+## HTML Output Format
+
+The output is a **print-ready static slide deck** — no JavaScript navigation, no clickable dots.
+All slides are visible and scrollable in a browser (each as a card with box-shadow). `@media print`
+paginates one slide per page via `page-break-after:always`.
+
+Key CSS invariants:
+- `.slide-container`: `height:auto; overflow:visible` — all slides visible in browser
+- `.slide-content`: `height:720px; box-shadow:...` — each is a card, flex column layout
+- `.cover-slide`: white background, position:relative for absolute children, compass+ruler SVG art
+- `@media print`: `.slide-content` gets `height:100vh; page-break-after:always; box-shadow:none`
+
+## Summary Slide
+
+`_summary_slide()` is defined in Cell 7 and appended to `_slides` after the per-asset loop.
+`_build_summary_text(key, s, p)` generates a unique per-asset 2-sentence summary using live stats
+(SMA55 position, RSI level, ADX quality, divergence signal, R1/S1 levels). Falls back to
+`p["outlook"]` if Claude prose is available.
