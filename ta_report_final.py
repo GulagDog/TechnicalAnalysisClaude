@@ -27,8 +27,12 @@ import matplotlib.ticker as mticker
 from matplotlib.lines import Line2D
 
 warnings.filterwarnings("ignore")
-bq = bql.Service()
-print("CELL 1 OK — BQL connected")
+try:
+    bq = bql.Service()
+    print("CELL 1 OK — BQL connected")
+except Exception as _e:
+    bq = None
+    print(f"CELL 1 — BQL unavailable ({_e}); cache mode only")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -100,6 +104,16 @@ if not _LOGO_SVG_RAW:
 CLAUDE_API_KEY = ""
 CLAUDE_MODEL   = "claude-sonnet-4-6"
 CLAUDE_TEMP    = 0.3
+
+# ── Cache toggle ──────────────────────────────────────────────────────────────
+USE_CACHE  = False          # True = load from cache; False = fetch from BQL
+SAVE_CACHE = True           # True = auto-save cache after each live BQL run
+CACHE_FILE = "ta_report_cache.pkl"
+
+# ── Cache toggle ──────────────────────────────────────────────────────────────
+USE_CACHE  = False          # True = load from cache; False = fetch from BQL
+SAVE_CACHE = True           # True = auto-save cache after each successful BQL run
+CACHE_FILE = "ta_report_cache.pkl"
 
 print("CELL 2 OK \u2014 FETCH_START: " + FETCH_START
       + " | CHART_START: " + CHART_START + " | END: " + END_DATE
@@ -1389,12 +1403,12 @@ def make_chart_b64(df_full, name, stats, asset_type="index"):
     price_range = lmax - lmin if lmax != lmin else lmax * 0.01
 
     # Figure + GridSpec
-    fig = plt.figure(figsize=(24, 11), facecolor="white")
+    fig = plt.figure(figsize=(24, 10), facecolor="white")
     gs  = gridspec.GridSpec(
         2, 1,
         height_ratios=[3.2, 1],
         hspace=0.04,
-        left=0.055, right=0.94,
+        left=0.025, right=0.975,
         top=0.96,   bottom=0.10,
     )
     ax1 = fig.add_subplot(gs[0])
@@ -1587,8 +1601,22 @@ def _log_asset_failure(key, meta, e, elapsed, exc_kind, print_traceback=False):
     }
 
 
+import pickle as _pickle, os as _os
+
 report_data = {}
-for _k, _m in ASSETS.items():
+
+# ── Cache load ────────────────────────────────────────────────────────────────
+if USE_CACHE and _os.path.exists(CACHE_FILE):
+    with open(CACHE_FILE, "rb") as _cf:
+        _cached = _pickle.load(_cf)
+    report_data = _cached["report_data"]
+    run_log.update(_cached.get("run_log_meta", {}))
+    print(f"CELL 6 — loaded from cache: {CACHE_FILE}  ({len(report_data)}/9 assets)")
+    _bql_assets = {}   # skip BQL loop
+else:
+    _bql_assets = ASSETS
+
+for _k, _m in _bql_assets.items():
     _t0 = time.time()
     print(f"  {_m['name']} ...")
     try:
@@ -1665,6 +1693,15 @@ for _k, _m in ASSETS.items():
 
     except Exception as _e:
         _log_asset_failure(_k, _m, _e, round(time.time() - _t0, 1), "Exception", print_traceback=True)
+
+# ── Cache save ────────────────────────────────────────────────────────────────
+if not USE_CACHE and SAVE_CACHE and report_data:
+    with open(CACHE_FILE, "wb") as _cf:
+        _pickle.dump({
+            "report_data":  report_data,
+            "run_log_meta": {"report_date": run_log["report_date"]},
+        }, _cf)
+    print(f"CELL 6 — cache saved → {CACHE_FILE}")
 
 # Print summary table
 print("\n" + "=" * 60)
@@ -1816,45 +1853,129 @@ def _template_prose_fallback(brief):
 
     adx_str = "strong" if adx_v >= 25 else "moderate" if adx_v >= 20 else "weak"
 
-    b1 = (name + " is trading <strong>" + above55 + " its 55-day SMA</strong> and "
-          "<strong>" + above200 + " its 200-day SMA</strong>, placing the asset in a "
+    # Extra context for richer bullets
+    # bb_pct may arrive as 0-100 (from build_claude_brief) or 0-1 (from _page2 direct call)
+    _bb_raw  = brief.get("bb_pct", 0.5)
+    bb_pct   = _bb_raw / 100.0 if _bb_raw > 1 else _bb_raw
+    stoch_k  = brief.get("stoch_k", 50)
+    price_roc = brief.get("price_roc_20", 0) or 0
+
+    # MA gap pct for b1
+    gap55  = round(abs(last - sma55_v)  / sma55_v  * 100, 1) if sma55_v  else 0
+    gap200 = round(abs(last - sma200_v) / sma200_v * 100, 1) if sma200_v else 0
+
+    b1 = (name + " is trading <strong>" + above55 + " its 55-day SMA</strong>"
+          " by " + str(gap55) + "% and <strong>" + above200 + " its 200-day SMA</strong>"
+          " by " + str(gap200) + "%, placing the asset in a "
           "<strong>" + trend_ph + "</strong> market phase." + golden_death)
 
-    b2 = ("RSI(9) at <strong>" + str(rsi_v) + "</strong>. ADX at " + str(round(adx_v, 0))
-          + " signals " + adx_str + " directional conviction." + div_note)
+    bb_pos = ("upper band" if bb_pct >= 0.7 else
+              "lower band" if bb_pct <= 0.3 else "mid-band")
+    stoch_str = ("overbought" if stoch_k >= 80 else
+                 "oversold"   if stoch_k <= 20 else "neutral")
+    b2 = ("RSI(9) at <strong>" + str(rsi_v) + "</strong> and Stochastic %K at "
+          + str(round(stoch_k, 0)) + " (" + stoch_str + "). "
+          "ADX at " + str(round(adx_v, 0)) + " signals " + adx_str
+          + " directional conviction. Bollinger Band position: " + bb_pos + "."
+          + div_note)
 
     bias_dir  = "bullish" if "Bullish" in bias else "bearish"
     key_level = r1 if "Bullish" in bias else s1
     move_dir  = "above" if "Bullish" in bias else "below"
+    roc_str   = ("+" if price_roc >= 0 else "") + str(round(price_roc, 1)) + "%"
 
     b3 = ("<strong>R1 " + r1 + "</strong> is the immediate resistance ceiling; "
-          "<strong>S1 " + s1 + "</strong> is key support. Dominant structure: "
-          "<strong>" + pat + "</strong>. A confirmed " + bias_dir + " close "
-          + move_dir + " " + key_level + " would confirm the next directional leg.")
+          "<strong>S1 " + s1 + "</strong> is the key support to defend. "
+          "Dominant structure: <strong>" + pat + "</strong> (" + pconf + " confidence). "
+          "20-day price ROC: " + roc_str + ". "
+          "A confirmed " + bias_dir + " daily close " + move_dir + " " + key_level
+          + " would signal commitment to the next directional leg.")
 
     pattern_text = ("Pattern: <strong>" + pat + "</strong> (" + pconf + " confidence). "
                     "RSI(9) at " + str(rsi_v) + ", ADX " + str(round(adx_v, 0))
                     + " \u2014 " + adx_str + " conviction.")
 
+    # Narrative title: bias + trend-phase aware
+    _phase_word = {
+        "Uptrend":    "Building Momentum",
+        "Downtrend":  "Under Sustained Pressure",
+        "Transition": "At an Inflection Point",
+        "Ranging":    "Locked in Consolidation",
+    }
+    _bias_phrase = {
+        "Bullish":        "Bulls in Control",
+        "Mildly Bullish": "Cautiously Constructive",
+        "Neutral":        "Awaiting Directional Catalyst",
+        "Mildly Bearish": "Bears Gaining Ground",
+        "Bearish":        "Bearish Pressure Mounting",
+    }
+    _ph = _phase_word.get(trend_ph, "At a Crossroads")
+    _bp = _bias_phrase.get(bias, bias)
+    narrative_title = name + ": " + _ph + " \u2014 " + _bp
+
+    # 4-sentence outlooks — structural view / key levels / momentum / forward scenario
     if bias == "Bullish":
-        outlook = ("The technical picture remains constructive. Price holds above key MAs and "
-                   "momentum is supportive. A sustained push above " + r1 + " reinforces the "
-                   "bullish case; failure to hold " + s1 + " warrants caution.")
+        outlook = (
+            "The technical picture for " + name + " is constructive, with price holding "
+            + above55 + " both the 55- and 200-day SMAs in a " + adx_str + " trend regime. "
+            "The immediate ceiling sits at " + r1 + "; a sustained daily close above this level "
+            "would open the next leg higher toward the broader resistance cluster. "
+            "RSI(9) at " + str(rsi_v) + " leaves headroom before overbought territory, "
+            "and ADX at " + str(round(adx_v, 0)) + " confirms directional conviction remains intact."
+            + div_note + " "
+            "Near-term pullbacks toward " + s1 + " should be treated as opportunity; "
+            "a closing breach of that level would warrant a reassessment of the bullish thesis."
+        )
     elif bias == "Mildly Bullish":
-        outlook = ("Conditions are cautiously positive. Watch " + r1 + " as the next hurdle "
-                   "and " + s1 + " as the key support level to defend on near-term weakness.")
+        outlook = (
+            name + " exhibits cautiously positive structure, trading " + above55
+            + " key moving averages with a " + adx_str + " trend backdrop. "
+            "The " + r1 + " resistance zone is the next meaningful hurdle for bulls to clear; "
+            "clearing it on volume would materially strengthen the constructive case. "
+            "Momentum indicators (RSI " + str(rsi_v) + ", ADX " + str(round(adx_v, 0))
+            + ") are supportive but not yet confirming a high-conviction breakout."
+            + div_note + " "
+            "Watch " + s1 + " as the key support level to defend on any near-term weakness "
+            "\u2014 a break there would neutralise the mildly bullish bias."
+        )
     elif bias == "Neutral":
-        outlook = ("The asset is range-bound. A closing break above " + r1 + " or below "
-                   + s1 + " will define the next meaningful directional move.")
+        outlook = (
+            name + " is in a defined range, with neither bulls nor bears asserting control. "
+            "Price is oscillating between " + s1 + " support and " + r1 + " resistance, "
+            "with ADX at " + str(round(adx_v, 0)) + " confirming a low-conviction directional environment. "
+            "RSI(9) at " + str(rsi_v) + " sits near the midpoint, consistent with range-bound conditions."
+            + div_note + " "
+            "A decisive closing break above " + r1 + " or below " + s1 + " is required "
+            "to establish the next meaningful trend; until then, fading the extremes is preferred."
+        )
     elif bias == "Mildly Bearish":
-        outlook = (s1 + " is the critical support to defend \u2014 a breach would likely "
-                   "extend the corrective move lower. Resistance at " + r1 + " caps rallies.")
-    else:
-        outlook = ("Technical indicators broadly align lower. Rallies toward " + r1
-                   + " are likely to face selling pressure. Monitor for reversal confirmation.")
+        outlook = (
+            name + " is showing signs of deterioration, with momentum tilting lower "
+            "and price under pressure in a " + adx_str + " directional environment. "
+            "The " + s1 + " support level is critical \u2014 a confirmed break below it "
+            "would likely extend the corrective move and expose deeper support zones. "
+            "RSI(9) at " + str(rsi_v) + " and ADX at " + str(round(adx_v, 0))
+            + " suggest conviction is building to the downside."
+            + div_note + " "
+            "Resistance at " + r1 + " caps any recovery attempt; "
+            "only a close back above that level would begin to neutralise the bearish lean."
+        )
+    else:  # Bearish
+        outlook = (
+            "The technical picture for " + name + " is broadly negative, with price "
+            + above55 + " key moving averages and momentum indicators aligned lower. "
+            "Rallies toward " + r1 + " are expected to encounter significant selling pressure "
+            "and should be treated as distribution opportunities rather than re-entry points. "
+            "RSI(9) at " + str(rsi_v) + " and ADX at " + str(round(adx_v, 0))
+            + " confirm the bearish trend is intact with " + adx_str + " conviction."
+            + div_note + " "
+            "The immediate downside target is " + s1 + "; "
+            "monitor for reversal confirmation (bullish divergence or key-level reclaim) "
+            "before considering any counter-trend positioning."
+        )
 
     return {
-        "title":        name + ": " + pat,
+        "title":        narrative_title,
         "bullet1":      b1,
         "bullet2":      b2,
         "bullet3":      b3,
@@ -2201,7 +2322,7 @@ def _page1(key, asset, pnum):
 
     chart_img = (
         '<img src="data:image/png;base64,' + ch
-        + '" style="width:100%;height:100%;object-fit:contain;display:block"/>'
+        + '" style="width:100%;height:auto;display:block"/>'
         if ch else
         '<div style="text-align:center;padding:40px 0;color:#9ca3af;font-size:13px">'
         "Chart unavailable</div>"
@@ -2226,7 +2347,7 @@ def _page1(key, asset, pnum):
         "</div>"
         + accent
         + '<div class="divider"></div>'
-        '<div style="flex:1;min-height:0;overflow:hidden;margin-bottom:4px">'
+        '<div style="flex:0 0 auto;overflow:hidden;margin-bottom:6px">'
         + chart_img + "</div>"
         '<div class="analysis">'
         '<div class="ai"><span class="bullet">&#9658;</span><p>' + b1 + "</p></div>"
@@ -2342,6 +2463,9 @@ def _page2(key, asset, pnum):
             "bias": bias,
             "last": s["last"], "sma55": s["sma55"], "sma200": s["sma200"],
             "rsi": s["rsi_val"], "adx": s["adx_val"],
+            "bb_pct": s.get("bb_pct_val", 0.5),
+            "stoch_k": s.get("stoch_k", 50),
+            "price_roc_20": s.get("price_roc_20", 0),
             "R1": s["resistances"][0] if s["resistances"] else None,
             "S1": s["supports"][0] if s["supports"] else None,
             "pattern": s["pattern"],
@@ -2397,8 +2521,6 @@ def _page2(key, asset, pnum):
 
         '<div class="ibox box-lvl">'
         '<h3>Key Resistance &amp; Support Levels</h3>'
-        '<p style="font-size:9px;color:#9ca3af;margin-bottom:3px;font-style:italic">'
-        '\u25cf strength: Fib weight + swing + round number + proximity + confluence</p>'
         '<div class="lvl-sec">'
         '<p class="lvl-title res-title">RESISTANCE</p>' + res_rows + "</div>"
         '<div class="lvl-sec" style="border-top:1px solid #d1d5db;padding-top:4px">'
@@ -2447,61 +2569,61 @@ def _cover():
     """Render cover slide — white background, bank-style design."""
     names = " &middot; ".join(a["meta"]["name"] for a in report_data.values())
 
-    # Continuous line-art illustration: pencil → flowing line → loops → bar chart
-    # All elements share the same stroke style (navy, thin, no fill) — mimics a
-    # single-stroke sketch as seen in investment/analytics brand design.
+    # Abstract full-width rollercoaster line art spanning the entire cover.
+    # A single continuous path enters from the left edge, makes dramatic
+    # roller-coaster peaks and troughs across the full 1280px width, and exits
+    # at the right. Positioned in the lower-centre zone so it does not overlap
+    # the title text block (upper-left) or the logo (upper-right).
     _art_div = (
-        '<div style="position:absolute;top:0;right:0;width:640px;height:720px;'
+        '<div style="position:absolute;top:0;left:0;width:1280px;height:720px;'
         'overflow:hidden;pointer-events:none;z-index:0">'
-        '<svg viewBox="0 0 640 720" width="640" height="720" '
+        '<svg viewBox="0 0 1280 720" width="1280" height="720" '
         'xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#11366B" '
         'stroke-linecap="round" stroke-linejoin="round">'
 
-        # — Pencil body (bottom-left of illustration, rotated -25°) —
-        '<g transform="translate(82,648) rotate(-25)">'
-        '<rect x="-7" y="-50" width="14" height="36" rx="1" stroke-width="1.4" opacity="0.55"/>'
-        '<line x1="-7" y1="-50" x2="7" y2="-50" stroke-width="3.5" opacity="0.22"/>'
-        '<line x1="-7" y1="-42" x2="7" y2="-42" stroke-width="1.0" opacity="0.30"/>'
-        '<polygon points="-7,-14 7,-14 0,5" stroke-width="1.4" opacity="0.55"/>'
-        '</g>'
+        # — Main rollercoaster path — left edge → dramatic peaks/troughs → right edge —
+        # Baseline sits around y=500; peaks reach ~y=280; troughs dip to ~y=580.
+        # Bezier control points create the curved rollercoaster hill/valley shape.
+        '<path d="'
+        'M 0,500 '
+        'C 30,500 55,290 110,275 '
+        'C 165,260 185,560 240,570 '
+        'C 295,580 310,310 380,290 '
+        'C 450,270 460,580 530,575 '
+        'C 600,570 610,295 680,280 '
+        'C 750,265 760,590 840,585 '
+        'C 920,580 930,300 1000,285 '
+        'C 1070,270 1080,560 1150,555 '
+        'C 1210,550 1250,420 1280,410'
+        '" stroke-width="2.0" opacity="0.45"/>'
 
-        # — Flowing line from pencil tip into the composition —
-        '<path d="M 94,643 C 138,632 188,612 228,586 C 268,560 294,528 316,494'
-        ' C 330,472 338,450 338,432" stroke-width="1.6" opacity="0.52"/>'
+        # — Faint shadow/echo path slightly offset (depth effect) —
+        '<path d="'
+        'M 0,515 '
+        'C 30,515 55,305 110,290 '
+        'C 165,275 185,575 240,585 '
+        'C 295,595 310,325 380,305 '
+        'C 450,285 460,595 530,590 '
+        'C 600,585 610,310 680,295 '
+        'C 750,280 760,605 840,600 '
+        'C 920,595 930,315 1000,300 '
+        'C 1070,285 1080,575 1150,570 '
+        'C 1210,565 1250,435 1280,425'
+        '" stroke-width="1.0" opacity="0.14"/>'
 
-        # — Bar chart (base + 4 bars, drawn as open rectangles) —
-        '<line x1="325" y1="432" x2="502" y2="432" stroke-width="1.6" opacity="0.50"/>'
-        '<path d="M 340,432 L 340,338 L 368,338 L 368,432" stroke-width="1.6" opacity="0.50"/>'
-        '<path d="M 376,432 L 376,278 L 404,278 L 404,432" stroke-width="1.6" opacity="0.50"/>'
-        '<path d="M 412,432 L 412,220 L 440,220 L 440,432" stroke-width="1.6" opacity="0.50"/>'
-        '<path d="M 448,432 L 448,262 L 476,262 L 476,432" stroke-width="1.6" opacity="0.50"/>'
+        # — Subtle horizontal baseline across the full width —
+        '<line x1="0" y1="500" x2="1280" y2="500" '
+        'stroke-width="0.7" opacity="0.10" stroke-dasharray="6,8"/>'
 
-        # — Line from top of tallest bar up and into the outer loop —
-        '<path d="M 412,220 C 406,195 396,168 380,148 C 364,128 342,116 318,120'
-        ' C 294,124 274,142 264,166 C 254,190 258,218 272,240'
-        ' C 286,262 308,274 332,276" stroke-width="1.5" opacity="0.42"/>'
-
-        # — Outer loop sweeping right and around the chart —
-        '<path d="M 338,432 C 338,420 344,400 362,382 C 380,364 408,354 438,350'
-        ' C 468,346 502,352 526,370 C 550,388 562,416 558,444'
-        ' C 554,472 534,496 506,508 C 478,520 444,518 416,506'
-        ' C 388,494 368,472 362,448 C 356,424 366,400 382,386"'
-        ' stroke-width="1.4" opacity="0.30"/>'
-
-        # — Second, larger outer loop (gives the orbiting feel) —
-        '<path d="M 332,276 C 358,270 392,268 424,272 C 466,278 506,296 532,326'
-        ' C 558,356 564,396 554,432 C 544,468 518,498 482,514'
-        ' C 446,530 402,528 364,512 C 326,496 298,464 288,428'
-        ' C 278,392 290,352 314,326 C 338,300 372,284 408,280"'
-        ' stroke-width="1.3" opacity="0.22"/>'
-
-        # — Top flourish: line trailing off top-right —
-        '<path d="M 318,120 C 320,96 334,72 358,58 C 382,44 412,44 434,56'
-        ' C 456,68 466,92 460,116" stroke-width="1.3" opacity="0.28"/>'
-
-        # — Bottom-right decorative trailing loop —
-        '<path d="M 558,444 C 574,472 585,508 578,540 C 571,572 550,596 558,622'
-        ' C 564,640 582,650 598,644" stroke-width="1.3" opacity="0.24"/>'
+        # — Faint vertical guides at each peak/trough apex —
+        '<line x1="110"  y1="420" x2="110"  y2="500" stroke-width="0.6" opacity="0.10"/>'
+        '<line x1="240"  y1="500" x2="240"  y2="580" stroke-width="0.6" opacity="0.10"/>'
+        '<line x1="380"  y1="400" x2="380"  y2="500" stroke-width="0.6" opacity="0.10"/>'
+        '<line x1="530"  y1="500" x2="530"  y2="585" stroke-width="0.6" opacity="0.10"/>'
+        '<line x1="680"  y1="395" x2="680"  y2="500" stroke-width="0.6" opacity="0.10"/>'
+        '<line x1="840"  y1="500" x2="840"  y2="590" stroke-width="0.6" opacity="0.10"/>'
+        '<line x1="1000" y1="400" x2="1000" y2="500" stroke-width="0.6" opacity="0.10"/>'
+        '<line x1="1150" y1="500" x2="1150" y2="565" stroke-width="0.6" opacity="0.10"/>'
 
         '</svg></div>'
     )
@@ -2509,7 +2631,7 @@ def _cover():
     return (
         '<div class="slide-content cover-slide" id="s-cover">'
         + _art_div +
-        '<div style="position:absolute;top:32px;right:40px;z-index:2">'
+        '<div style="position:absolute;top:20px;right:40px;z-index:2">'
         + _get_logo("dark", "40px") +
         "</div>"
         '<div class="cover-inner">'
@@ -2528,34 +2650,52 @@ def _cover():
     )
 
 
+def _build_summary_text(key, s, p):
+    """2-sentence unique per-asset summary using asset-specific indicator data."""
+    bias   = s.get("overall_bias", "Neutral")
+    pat    = s.get("pattern", "Range Consolidation")
+    rsi    = s.get("rsi_val", 50)
+    adx    = round(s.get("adx_val", 20), 0)
+    r1     = _fmt((s.get("resistances") or [None])[0])
+    s1_v   = _fmt((s.get("supports") or [None])[0])
+    ms     = s.get("market_structure", {})
+    phase  = (ms.get("trend_phase") or ("Transition",))[0]
+    adx_s  = "strong" if adx >= 25 else "moderate" if adx >= 20 else "weak"
+    sent1  = (pat + " structure in a " + phase.lower() + " phase \u2014 "
+              "RSI(9) at " + str(rsi) + ", ADX " + str(adx) + " (" + adx_s + " trend).")
+    if "Bullish" in bias:
+        sent2 = ("Bulls target " + r1 + "; key support at " + s1_v
+                 + " must hold for the thesis to remain intact.")
+    elif "Bearish" in bias:
+        sent2 = ("Bears eye a break below " + s1_v + "; overhead resistance at " + r1
+                 + " caps any recovery attempt.")
+    else:
+        sent2 = ("A decisive break above " + r1 + " or below " + s1_v
+                 + " will set the next directional move.")
+    return sent1 + " " + sent2
+
+
 def _summary_slide(pnum):
-    """Render final summary slide — one row per asset with bias + outlook sentence."""
+    """Render final summary slide — one row per asset with unique summary text."""
     rows = ""
     for _k, _a in report_data.items():
         _s    = _a.get("stats") or {}
         _p    = claude_prose.get(_k, {})
-        _bias = _s.get("overall_bias", "N/A")
-        _bc   = "#15803d" if "Bullish" in _bias else "#b91c1c" if "Bearish" in _bias else "#92400e"
         _name = ASSETS[_k]["name"] if isinstance(ASSETS.get(_k), dict) else _a["meta"]["name"]
-        _out  = (_p.get("outlook") or
-                 f"{_bias}. {_s.get('pattern', 'No pattern detected')} detected.")
+        _out  = _build_summary_text(_k, _s, _p)
         rows += (
             f'<tr>'
-            f'<td style="font-weight:700;padding:5px 10px;white-space:nowrap;font-size:12px">'
+            f'<td style="font-weight:700;padding:12px 14px;white-space:nowrap;font-size:13px">'
             f'{_name}</td>'
-            f'<td style="padding:5px 10px">'
-            f'<span style="color:{_bc};font-weight:600;font-size:12px">{_bias}</span></td>'
-            f'<td style="padding:5px 10px;font-size:11.5px;line-height:1.4">{_out}</td>'
+            f'<td style="padding:12px 14px;font-size:12.5px;line-height:1.55">{_out}</td>'
             f'</tr>'
         )
     table = (
         '<table style="width:100%;border-collapse:collapse">'
         '<thead><tr style="background:#11366B">'
-        '<th style="text-align:left;padding:7px 10px;color:white;font-size:11px;width:110px">'
+        '<th style="text-align:left;padding:10px 14px;color:white;font-size:11.5px;width:120px">'
         'Asset</th>'
-        '<th style="text-align:left;padding:7px 10px;color:white;font-size:11px;width:150px">'
-        'Bias</th>'
-        '<th style="text-align:left;padding:7px 10px;color:white;font-size:11px">'
+        '<th style="text-align:left;padding:10px 14px;color:white;font-size:11.5px">'
         'Outlook Summary</th>'
         '</tr></thead>'
         '<tbody>' + rows + '</tbody>'
@@ -2658,7 +2798,7 @@ body {
 .analysis { display: flex; flex-direction: column; gap: 3px; flex-shrink: 0; }
 .ai { display: flex; align-items: flex-start; gap: 7px; }
 .bullet { color: #11366B; font-size: 11px; flex-shrink: 0; margin-top: 3px; }
-.analysis p { font-size: 12.5px; line-height: 1.55; color: #374151; }
+.analysis p { font-size: 13px; line-height: 1.6; color: #374151; }
 
 /* Footer */
 .footer {

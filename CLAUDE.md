@@ -37,7 +37,13 @@ python -m py_compile ta_report_final.py
 Execute the file top-to-bottom in a BQuant notebook. Each cell prints `CELL N OK` on success.
 
 **Claude API prose (optional):**
-Set `CLAUDE_API_KEY` in Cell 7A before running. Leave empty to use the deterministic template fallback.
+Set `CLAUDE_API_KEY` in Cell 2 before running. Leave empty to use the deterministic template fallback.
+
+**Cache mode (HTML iteration without Bloomberg):**
+```python
+USE_CACHE  = True   # in Cell 2 — loads ta_report_cache.pkl, skips BQL entirely
+USE_CACHE  = False  # live BQL run; auto-saves cache if SAVE_CACHE=True
+```
 
 **Output files written to the current working directory:**
 - `Alpha_Bank_TA_Report_YYYYMM[_vN].html` — interactive HTML deck
@@ -50,14 +56,14 @@ The file is structured as 9 sequential cells, each building on the previous:
 
 | Cell | Role |
 |------|------|
-| 1 | Imports; `bq = bql.Service()` |
-| 2 | Config: `ASSETS`, date windows, `MIN_ROWS`, `FIB_LOOKBACK`, `PATTERN_WINDOWS`, logo loading |
+| 1 | Imports; `bq = bql.Service()` wrapped in try/except (cache mode safe) |
+| 2 | Config: `ASSETS`, date windows, `MIN_ROWS`, `FIB_LOOKBACK`, `PATTERN_WINDOWS`, logo loading, cache constants (`USE_CACHE`, `SAVE_CACHE`, `CACHE_FILE`) |
 | 3 | `fetch_ohlcv()` → `validate_ohlcv()` → `detect_stale_fills()` → `compute_indicators()` → `_compute_weekly_indicators()` |
 | 4 | Signal helpers, `compute_bias_score()`, `_detect_chart_pattern()`, `_compute_sr_levels()`, `_compute_market_structure()`, `compute_stats()` |
 | 5 | `make_chart_b64()` — 1-year daily matplotlib chart → Base64 PNG; `_accent_band()` |
-| 6 | Main loop over 9 assets; per-asset exception handling; `run_log` dict |
-| 7A | Claude API integration: `build_claude_brief()` → `_call_claude()` → `_validate_claude_output()`; `_template_prose_fallback()` fallback; populates `claude_prose` dict |
-| 7 | HTML builders: `_page1()`, `_page2()`, `_warning_slide()`, `_cover()`, `_perf_scorecard_html()`, `_market_structure_html()` |
+| 6 | Cache-aware main loop: loads `ta_report_cache.pkl` if `USE_CACHE=True`, else runs BQL fetch for 9 assets and auto-saves cache if `SAVE_CACHE=True` |
+| 7A | Claude API integration: `build_claude_brief()` → `_call_claude()` → `_validate_claude_output()`; `_template_prose_fallback()` fallback (narrative titles + 4-sentence outlooks); populates `claude_prose` dict |
+| 7 | HTML builders: `_page1()`, `_page2()`, `_warning_slide()`, `_cover()`, `_perf_scorecard_html()`, `_market_structure_html()`, `_build_summary_text()`, `_summary_slide()` |
 | 8 | CSS + JS assembly; versioned filename; WeasyPrint PDF; smoke tests; run log JSON write |
 
 **Data flow:**
@@ -77,11 +83,15 @@ These must be preserved across any edits:
 - **`adx_sig(adx, di_plus, di_minus)`** takes 3 arguments (returns directional bias)
 - **Signals dict key**: `"RSI (9)"` (used as dict key in `compute_stats()` and referenced in `_bullets()` / HTML builders)
 - **Slide dimensions**: 1280×720px hardcoded in CSS and `make_chart_b64()`
+- **Chart figsize**: `(24, 10)` — renders at ~533px tall at 1280px wide; fills Page 1 vertically
+- **Chart margins**: GridSpec `left=0.025, right=0.975` — chart fills full slide width
+- **Chart img**: `width:100%;height:auto` — no letterboxing
 - **Brand color**: `#11366B` (Alpha Bank navy)
 - **Badge classes**: `sb-bull` / `sb-bear` / `sb-neut` — used throughout CSS and HTML builders
 - **BQL fetch pattern**: per-field merge (individual `bq.data.*` fields joined) — never `bql.combined_df(res)`
 - **Cell order**: Cell 5 must precede Cell 6 in the file (chart function must exist before main loop calls it)
 - **MACD**: 12/26/9; **BB**: 20/2; **Stochastic**: 14/3/3; **ADX**: 14; **Fib levels**: 0%, 23.6%, 38.2%, 50%, 61.8%, 78.6%, 100%
+- **Cache**: `USE_CACHE / SAVE_CACHE / CACHE_FILE` in Cell 2; pickle saves `report_data` after Cell 6 live run
 
 ## Asset Configuration
 
@@ -157,6 +167,19 @@ except Exception:       # catch-all with traceback.print_exc()
 ```
 
 Failed assets produce a `_warning_slide()` placeholder and are logged in `run_log["assets"][key]` with `status="failed"`.
+
+## HTML Slide Design (current state)
+
+| Slide | Key design decisions |
+|-------|---------------------|
+| Cover | White bg, full-width abstract rollercoaster SVG (navy, lower half), logo top-right `top:20px` |
+| Page 1 | Narrative title (bias+phase aware), chart fills full width (`figsize=24×10`), 3 bullets below |
+| Page 2 | Indicator matrix + S/R levels (no strength subtext) + 4-sentence Total Outlook |
+| Summary | Asset + Outlook only (no Bias column); unique 2-sentence text per asset via `_build_summary_text()` |
+
+**`_template_prose_fallback()` output keys:** `title` (narrative), `bullet1–3` (richer with gap/stoch/ROC context), `pattern_text`, `outlook` (4 sentences per bias branch).
+
+**`_build_summary_text(key, s, p)`** — generates per-asset summary text distinct from the outlook (pattern + phase + RSI/ADX + level scenario).
 
 ## Claude API (Cell 7A)
 
