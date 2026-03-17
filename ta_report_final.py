@@ -1394,7 +1394,7 @@ def make_chart_b64(df_full, name, stats, asset_type="index"):
         2, 1,
         height_ratios=[3.2, 1],
         hspace=0.04,
-        left=0.025, right=0.975,
+        left=0.055, right=0.94,
         top=0.96,   bottom=0.10,
     )
     ax1 = fig.add_subplot(gs[0])
@@ -1836,69 +1836,25 @@ def _template_prose_fallback(brief):
                     "RSI(9) at " + str(rsi_v) + ", ADX " + str(round(adx_v, 0))
                     + " \u2014 " + adx_str + " conviction.")
 
-    _phase_word = {
-        "Uptrend":    "Momentum Builds",
-        "Downtrend":  "Selling Pressure Mounts",
-        "Transition": "At a Crossroads",
-        "Ranging":    "Range-Bound",
-    }.get(trend_ph, "Under Pressure")
-
-    if "Bullish" in bias:
-        _narrative_title = name + ": " + _phase_word + " \u2014 " + pat + " Pattern Active"
-    elif "Bearish" in bias:
-        _narrative_title = name + ": " + _phase_word + " \u2014 " + pat + " Signals Caution"
-    else:
-        _narrative_title = name + ": " + _phase_word + " as " + pat + " Develops"
-
     if bias == "Bullish":
-        outlook = (
-            "The technical picture for " + name + " remains constructive. "
-            "Price is trading " + above55 + " its 55-day SMA and " + above200
-            + " its 200-day SMA, consistent with a " + trend_ph + " phase." + golden_death + " "
-            "RSI(9) at " + str(rsi_v) + " keeps momentum in constructive territory." + div_note + " "
-            "A sustained close above " + r1 + " would open the next leg higher; "
-            "a break below " + s1 + " would signal a near-term pullback and warrant defensive repositioning."
-        )
+        outlook = ("The technical picture remains constructive. Price holds above key MAs and "
+                   "momentum is supportive. A sustained push above " + r1 + " reinforces the "
+                   "bullish case; failure to hold " + s1 + " warrants caution.")
     elif bias == "Mildly Bullish":
-        outlook = (
-            "Conditions for " + name + " are cautiously positive, with price " + above55
-            + " the 55-day SMA in a " + trend_ph + " market phase." + golden_death + " "
-            "RSI(9) at " + str(rsi_v) + " and ADX at " + str(round(adx_v)) + " suggest " + adx_str
-            + " directional conviction \u2014 a strengthening trend would add conviction to the bull case." + div_note + " "
-            "Watch " + r1 + " as the next resistance hurdle; a decisive close above it confirms upside continuation. "
-            "Key support at " + s1 + " must hold on any pullback to preserve the constructive bias."
-        )
+        outlook = ("Conditions are cautiously positive. Watch " + r1 + " as the next hurdle "
+                   "and " + s1 + " as the key support level to defend on near-term weakness.")
     elif bias == "Neutral":
-        outlook = (
-            name + " is currently range-bound, trading " + above55 + " its 55-day SMA in a "
-            + trend_ph + " phase with no clear directional conviction. "
-            "RSI(9) at " + str(rsi_v) + " and ADX at " + str(round(adx_v))
-            + " reflect subdued momentum \u2014 neither bulls nor bears have asserted control." + div_note + " "
-            "A closing break above " + r1 + " would tip the balance toward the bulls and invite trend-following longs. "
-            "Conversely, a confirmed close below " + s1 + " would shift the outlook bearish and expose lower supports."
-        )
+        outlook = ("The asset is range-bound. A closing break above " + r1 + " or below "
+                   + s1 + " will define the next meaningful directional move.")
     elif bias == "Mildly Bearish":
-        outlook = (
-            name + " shows early signs of technical deterioration, trading " + above55
-            + " its 55-day SMA in a " + trend_ph + " phase." + golden_death + " "
-            "RSI(9) at " + str(rsi_v) + " is drifting into weaker territory; ADX at " + str(round(adx_v))
-            + " indicates " + adx_str + " trend strength." + div_note + " "
-            "Resistance at " + r1 + " is expected to cap near-term relief rallies. "
-            "A close below " + s1 + " would confirm the corrective impulse and likely extend the move lower."
-        )
+        outlook = (s1 + " is the critical support to defend \u2014 a breach would likely "
+                   "extend the corrective move lower. Resistance at " + r1 + " caps rallies.")
     else:
-        outlook = (
-            "Technical indicators for " + name + " broadly align to the downside. "
-            "Price is trading " + above55 + " its 55-day SMA and " + above200
-            + " its 200-day SMA in a " + trend_ph + " phase." + golden_death + " "
-            "RSI(9) at " + str(rsi_v) + " reflects weak momentum; ADX at " + str(round(adx_v))
-            + " confirms " + adx_str + " bearish conviction." + div_note + " "
-            "Rallies toward " + r1 + " are expected to attract selling pressure. "
-            "Monitor " + s1 + " as the next downside trigger \u2014 a sustained breach would open the path to lower technical targets."
-        )
+        outlook = ("Technical indicators broadly align lower. Rallies toward " + r1
+                   + " are likely to face selling pressure. Monitor for reversal confirmation.")
 
     return {
-        "title":        _narrative_title,
+        "title":        name + ": " + pat,
         "bullet1":      b1,
         "bullet2":      b2,
         "bullet3":      b3,
@@ -2270,7 +2226,7 @@ def _page1(key, asset, pnum):
         "</div>"
         + accent
         + '<div class="divider"></div>'
-        '<div style="flex:0 0 370px;min-height:0;overflow:hidden;margin-bottom:6px">'
+        '<div style="flex:1;min-height:0;overflow:hidden;margin-bottom:4px">'
         + chart_img + "</div>"
         '<div class="analysis">'
         '<div class="ai"><span class="bullet">&#9658;</span><p>' + b1 + "</p></div>"
@@ -2441,6 +2397,8 @@ def _page2(key, asset, pnum):
 
         '<div class="ibox box-lvl">'
         '<h3>Key Resistance &amp; Support Levels</h3>'
+        '<p style="font-size:9px;color:#9ca3af;margin-bottom:3px;font-style:italic">'
+        '\u25cf strength: Fib weight + swing + round number + proximity + confluence</p>'
         '<div class="lvl-sec">'
         '<p class="lvl-title res-title">RESISTANCE</p>' + res_rows + "</div>"
         '<div class="lvl-sec" style="border-top:1px solid #d1d5db;padding-top:4px">'
@@ -2489,79 +2447,61 @@ def _cover():
     """Render cover slide — white background, bank-style design."""
     names = " &middot; ".join(a["meta"]["name"] for a in report_data.values())
 
-    # Drafting compass + ruler illustration — geometric, linear, no loops.
-    # Compass pivot at (310, 210); two legs spread open; arc mid-draw.
-    # Ruler sits across the bottom of the art area.
-    # All elements: stroke navy, no fill (except ruler body faint tint).
-    # Nothing extends above y=120 — logo safe zone preserved.
+    # Continuous line-art illustration: pencil → flowing line → loops → bar chart
+    # All elements share the same stroke style (navy, thin, no fill) — mimics a
+    # single-stroke sketch as seen in investment/analytics brand design.
     _art_div = (
-        '<div style="position:absolute;top:0;right:0;width:620px;height:720px;'
+        '<div style="position:absolute;top:0;right:0;width:640px;height:720px;'
         'overflow:hidden;pointer-events:none;z-index:0">'
-        '<svg viewBox="0 0 620 720" width="620" height="720" '
+        '<svg viewBox="0 0 640 720" width="640" height="720" '
         'xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#11366B" '
         'stroke-linecap="round" stroke-linejoin="round">'
 
-        # — Compass hinge (pivot circle) —
-        '<circle cx="310" cy="210" r="5" stroke-width="1.5" opacity="0.45"/>'
+        # — Pencil body (bottom-left of illustration, rotated -25°) —
+        '<g transform="translate(82,648) rotate(-25)">'
+        '<rect x="-7" y="-50" width="14" height="36" rx="1" stroke-width="1.4" opacity="0.55"/>'
+        '<line x1="-7" y1="-50" x2="7" y2="-50" stroke-width="3.5" opacity="0.22"/>'
+        '<line x1="-7" y1="-42" x2="7" y2="-42" stroke-width="1.0" opacity="0.30"/>'
+        '<polygon points="-7,-14 7,-14 0,5" stroke-width="1.4" opacity="0.55"/>'
+        '</g>'
 
-        # — Left leg: hinge → sharp point (needle tip) —
-        '<line x1="310" y1="210" x2="185" y2="490" stroke-width="1.5" opacity="0.45"/>'
-        # Diamond needle tip at (185, 490)
-        '<polygon points="185,482 189,490 185,498 181,490" stroke-width="1.3" opacity="0.45"/>'
+        # — Flowing line from pencil tip into the composition —
+        '<path d="M 94,643 C 138,632 188,612 228,586 C 268,560 294,528 316,494'
+        ' C 330,472 338,450 338,432" stroke-width="1.6" opacity="0.52"/>'
 
-        # — Right leg: hinge → pencil tip —
-        '<line x1="310" y1="210" x2="440" y2="490" stroke-width="1.5" opacity="0.45"/>'
-        # Pencil tip triangle at (440, 490)
-        '<polygon points="433,482 447,482 440,500" stroke-width="1.3" opacity="0.45"/>'
-        # Pencil ferrule line
-        '<line x1="434" y1="484" x2="446" y2="484" stroke-width="1.0" opacity="0.35"/>'
+        # — Bar chart (base + 4 bars, drawn as open rectangles) —
+        '<line x1="325" y1="432" x2="502" y2="432" stroke-width="1.6" opacity="0.50"/>'
+        '<path d="M 340,432 L 340,338 L 368,338 L 368,432" stroke-width="1.6" opacity="0.50"/>'
+        '<path d="M 376,432 L 376,278 L 404,278 L 404,432" stroke-width="1.6" opacity="0.50"/>'
+        '<path d="M 412,432 L 412,220 L 440,220 L 440,432" stroke-width="1.6" opacity="0.50"/>'
+        '<path d="M 448,432 L 448,262 L 476,262 L 476,432" stroke-width="1.6" opacity="0.50"/>'
 
-        # — Cross-piece (hinge bar connecting legs at ~y=295) —
-        # Left leg at y=295: parametric t=(295-210)/(490-210)=85/280≈0.304
-        #   x = 310 + (185-310)*0.304 = 310 - 38 = 272
-        # Right leg at y=295: x = 310 + (440-310)*0.304 = 310 + 39.5 ≈ 350
-        '<line x1="272" y1="295" x2="350" y2="295" stroke-width="1.4" opacity="0.40"/>'
-        # Small pivot caps at the leg intersections
-        '<circle cx="272" cy="295" r="3" stroke-width="1.2" opacity="0.38"/>'
-        '<circle cx="350" cy="295" r="3" stroke-width="1.2" opacity="0.38"/>'
+        # — Line from top of tallest bar up and into the outer loop —
+        '<path d="M 412,220 C 406,195 396,168 380,148 C 364,128 342,116 318,120'
+        ' C 294,124 274,142 264,166 C 254,190 258,218 272,240'
+        ' C 286,262 308,274 332,276" stroke-width="1.5" opacity="0.42"/>'
 
-        # — Arc drawn by pencil tip (compass mid-draw) —
-        # Center (310,210), radius ≈ 293 (distance to pencil tip at 440,490)
-        # Arc sweeps ~35° from pencil tip clockwise toward needle tip zone
-        # pencil tip angle: atan2(490-210, 440-310)=atan2(280,130)≈65° → start ~65°
-        # end ~100° (leftward) — SVG arc: large-arc=0 sweep=1
-        '<path d="M 440,490 A 293,293 0 0 1 258,497" stroke-width="1.6" opacity="0.50"/>'
+        # — Outer loop sweeping right and around the chart —
+        '<path d="M 338,432 C 338,420 344,400 362,382 C 380,364 408,354 438,350'
+        ' C 468,346 502,352 526,370 C 550,388 562,416 558,444'
+        ' C 554,472 534,496 506,508 C 478,520 444,518 416,506'
+        ' C 388,494 368,472 362,448 C 356,424 366,400 382,386"'
+        ' stroke-width="1.4" opacity="0.30"/>'
 
-        # — Ruler (bottom of art area, y=612–636) —
-        # Body rectangle
-        '<rect x="40" y="612" width="540" height="24" rx="2" '
-        'fill="#11366B" fill-opacity="0.04" stroke-width="1.4" opacity="0.42"/>'
-        # Major ticks (7 divisions, every 77px starting at x=40)
-        '<line x1="117" y1="612" x2="117" y2="600" stroke-width="1.3" opacity="0.42"/>'
-        '<line x1="194" y1="612" x2="194" y2="600" stroke-width="1.3" opacity="0.42"/>'
-        '<line x1="271" y1="612" x2="271" y2="600" stroke-width="1.3" opacity="0.42"/>'
-        '<line x1="348" y1="612" x2="348" y2="600" stroke-width="1.3" opacity="0.42"/>'
-        '<line x1="425" y1="612" x2="425" y2="600" stroke-width="1.3" opacity="0.42"/>'
-        '<line x1="502" y1="612" x2="502" y2="600" stroke-width="1.3" opacity="0.42"/>'
-        # Minor ticks (every ~19px between major ticks — 4 minor per division)
-        + "".join(
-            f'<line x1="{40 + 77*i + 19*j}" y1="612" '
-            f'x2="{40 + 77*i + 19*j}" y2="607" stroke-width="0.9" opacity="0.30"/>'
-            for i in range(7) for j in range(1, 4)
-        ) +
-        # Major tick numbers 1–7
-        '<text x="117" y="598" text-anchor="middle" font-size="8" opacity="0.40" '
-        'fill="#11366B" stroke="none">1</text>'
-        '<text x="194" y="598" text-anchor="middle" font-size="8" opacity="0.40" '
-        'fill="#11366B" stroke="none">2</text>'
-        '<text x="271" y="598" text-anchor="middle" font-size="8" opacity="0.40" '
-        'fill="#11366B" stroke="none">3</text>'
-        '<text x="348" y="598" text-anchor="middle" font-size="8" opacity="0.40" '
-        'fill="#11366B" stroke="none">4</text>'
-        '<text x="425" y="598" text-anchor="middle" font-size="8" opacity="0.40" '
-        'fill="#11366B" stroke="none">5</text>'
-        '<text x="502" y="598" text-anchor="middle" font-size="8" opacity="0.40" '
-        'fill="#11366B" stroke="none">6</text>'
+        # — Second, larger outer loop (gives the orbiting feel) —
+        '<path d="M 332,276 C 358,270 392,268 424,272 C 466,278 506,296 532,326'
+        ' C 558,356 564,396 554,432 C 544,468 518,498 482,514'
+        ' C 446,530 402,528 364,512 C 326,496 298,464 288,428'
+        ' C 278,392 290,352 314,326 C 338,300 372,284 408,280"'
+        ' stroke-width="1.3" opacity="0.22"/>'
+
+        # — Top flourish: line trailing off top-right —
+        '<path d="M 318,120 C 320,96 334,72 358,58 C 382,44 412,44 434,56'
+        ' C 456,68 466,92 460,116" stroke-width="1.3" opacity="0.28"/>'
+
+        # — Bottom-right decorative trailing loop —
+        '<path d="M 558,444 C 574,472 585,508 578,540 C 571,572 550,596 558,622'
+        ' C 564,640 582,650 598,644" stroke-width="1.3" opacity="0.24"/>'
 
         '</svg></div>'
     )
@@ -2569,7 +2509,7 @@ def _cover():
     return (
         '<div class="slide-content cover-slide" id="s-cover">'
         + _art_div +
-        '<div style="position:absolute;top:20px;right:40px;z-index:2">'
+        '<div style="position:absolute;top:32px;right:40px;z-index:2">'
         + _get_logo("dark", "40px") +
         "</div>"
         '<div class="cover-inner">'
@@ -2588,34 +2528,6 @@ def _cover():
     )
 
 
-def _build_summary_text(key, s, p):
-    """Build a unique, data-rich 2-sentence asset summary from live stats."""
-    if p.get("outlook"):
-        return p["outlook"]
-    last   = s.get("last", 0)
-    rsi    = s.get("rsi_val", 50)
-    adx    = s.get("adx_val", 20)
-    bias   = s.get("overall_bias", "Neutral")
-    pat    = s.get("pattern", "Range Consolidation")
-    r1     = _fmt((s.get("resistances") or [None])[0])
-    s1     = _fmt((s.get("supports") or [None])[0])
-    sma55  = s.get("sma55", last)
-    above  = "above" if last > sma55 else "below"
-    adx_q  = "strong" if adx >= 25 else "moderate" if adx >= 18 else "weak"
-    rsi_q  = "overbought" if rsi >= 70 else "oversold" if rsi <= 30 else f"at {rsi}"
-    ms     = s.get("market_structure", {})
-    div_lbl = ((ms.get("divergence") or ("None",))[0]
-               if ms.get("divergence") else "None")
-    div_note = (" Bullish RSI divergence supports recovery." if "Bullish Div" in div_lbl
-                else " Bearish RSI divergence adds downside risk." if "Bearish Div" in div_lbl
-                else "")
-    return (
-        f"{bias} \u2014 {pat} with {adx_q} trend conviction (ADX {round(adx)}). "
-        f"Price {above} SMA55; RSI(9) {rsi_q}.{div_note} "
-        f"Watch R1 {r1} / S1 {s1} for the next directional trigger."
-    )
-
-
 def _summary_slide(pnum):
     """Render final summary slide — one row per asset with bias + outlook sentence."""
     rows = ""
@@ -2625,26 +2537,25 @@ def _summary_slide(pnum):
         _bias = _s.get("overall_bias", "N/A")
         _bc   = "#15803d" if "Bullish" in _bias else "#b91c1c" if "Bearish" in _bias else "#92400e"
         _name = ASSETS[_k]["name"] if isinstance(ASSETS.get(_k), dict) else _a["meta"]["name"]
-        _out  = _build_summary_text(_k, _s, _p)
+        _out  = (_p.get("outlook") or
+                 f"{_bias}. {_s.get('pattern', 'No pattern detected')} detected.")
         rows += (
             f'<tr>'
-            f'<td style="font-weight:700;padding:12px 14px;white-space:nowrap;'
-            f'font-size:14px;vertical-align:top">'
+            f'<td style="font-weight:700;padding:5px 10px;white-space:nowrap;font-size:12px">'
             f'{_name}</td>'
-            f'<td style="padding:12px 14px;vertical-align:top">'
-            f'<span style="color:{_bc};font-weight:600;font-size:13.5px">{_bias}</span></td>'
-            f'<td style="padding:12px 14px;font-size:13px;line-height:1.5;vertical-align:top">'
-            f'{_out}</td>'
+            f'<td style="padding:5px 10px">'
+            f'<span style="color:{_bc};font-weight:600;font-size:12px">{_bias}</span></td>'
+            f'<td style="padding:5px 10px;font-size:11.5px;line-height:1.4">{_out}</td>'
             f'</tr>'
         )
     table = (
         '<table style="width:100%;border-collapse:collapse">'
         '<thead><tr style="background:#11366B">'
-        '<th style="text-align:left;padding:9px 14px;color:white;font-size:12px;width:120px">'
+        '<th style="text-align:left;padding:7px 10px;color:white;font-size:11px;width:110px">'
         'Asset</th>'
-        '<th style="text-align:left;padding:9px 14px;color:white;font-size:12px;width:170px">'
+        '<th style="text-align:left;padding:7px 10px;color:white;font-size:11px;width:150px">'
         'Bias</th>'
-        '<th style="text-align:left;padding:9px 14px;color:white;font-size:12px">'
+        '<th style="text-align:left;padding:7px 10px;color:white;font-size:11px">'
         'Outlook Summary</th>'
         '</tr></thead>'
         '<tbody>' + rows + '</tbody>'
@@ -2747,7 +2658,7 @@ body {
 .analysis { display: flex; flex-direction: column; gap: 3px; flex-shrink: 0; }
 .ai { display: flex; align-items: flex-start; gap: 7px; }
 .bullet { color: #11366B; font-size: 11px; flex-shrink: 0; margin-top: 3px; }
-.analysis p { font-size: 13px; line-height: 1.55; color: #374151; }
+.analysis p { font-size: 12.5px; line-height: 1.55; color: #374151; }
 
 /* Footer */
 .footer {
