@@ -2447,61 +2447,50 @@ def _cover():
     """Render cover slide — white background, bank-style design."""
     names = " &middot; ".join(a["meta"]["name"] for a in report_data.values())
 
-    # Bank-style inline SVG illustrations
-    _gear = (
-        '<svg width="72" height="72" viewBox="0 0 72 72" fill="none" '
-        'xmlns="http://www.w3.org/2000/svg">'
-        '<circle cx="36" cy="36" r="20" stroke="#11366B" stroke-width="2"/>'
-        '<circle cx="36" cy="36" r="10" stroke="#11366B" stroke-width="1.5"/>'
-        '<rect x="33" y="10" width="6" height="9" rx="1.5" fill="#11366B" opacity="0.65"/>'
-        '<rect x="33" y="53" width="6" height="9" rx="1.5" fill="#11366B" opacity="0.65"/>'
-        '<rect x="10" y="33" width="9" height="6" rx="1.5" fill="#11366B" opacity="0.65"/>'
-        '<rect x="53" y="33" width="9" height="6" rx="1.5" fill="#11366B" opacity="0.65"/>'
-        '<rect x="18" y="14" width="6" height="9" rx="1.5" fill="#11366B" opacity="0.5"'
-        ' transform="rotate(45 21 18.5)"/>'
-        '<rect x="48" y="14" width="6" height="9" rx="1.5" fill="#11366B" opacity="0.5"'
-        ' transform="rotate(-45 51 18.5)"/>'
-        '<rect x="18" y="49" width="6" height="9" rx="1.5" fill="#11366B" opacity="0.5"'
-        ' transform="rotate(-45 21 53.5)"/>'
-        '<rect x="48" y="49" width="6" height="9" rx="1.5" fill="#11366B" opacity="0.5"'
-        ' transform="rotate(45 51 53.5)"/>'
-        '</svg>'
+    # Abstract pencil-drawing-lines illustration — right-side background motif
+    _ruled_lines = ""
+    for _li in range(24):
+        _y   = 30 + _li * 28
+        _x2  = 590 - (_li % 5) * 18          # subtle length variation
+        _op  = round(0.055 + (_li % 3) * 0.018, 3)
+        _ruled_lines += (
+            f'<line x1="0" y1="{_y}" x2="{_x2}" y2="{_y}" '
+            f'stroke="#11366B" stroke-width="1" opacity="{_op}"/>'
+        )
+
+    # Pencil: translate to center (470, 555), rotate -35°, drawn pointing upward in local coords
+    _pencil_svg = (
+        '<g transform="translate(470,555) rotate(-35)">'
+        # Eraser cap
+        '<rect x="-12" y="-108" width="24" height="18" rx="3" '
+        'fill="#f9a8d4" opacity="0.55" stroke="#11366B" stroke-width="1.5"/>'
+        # Metal ferrule band
+        '<rect x="-12" y="-90" width="24" height="9" fill="#11366B" opacity="0.40"/>'
+        # Body
+        '<rect x="-12" y="-81" width="24" height="128" '
+        'fill="#11366B" opacity="0.10" stroke="#11366B" stroke-width="1.5"/>'
+        # Wood cone
+        '<polygon points="-12,47 12,47 0,78" fill="#11366B" opacity="0.18" '
+        'stroke="#11366B" stroke-width="1.5" stroke-linejoin="round"/>'
+        # Graphite tip
+        '<polygon points="-4,78 4,78 0,88" fill="#11366B" opacity="0.55"/>'
+        '</g>'
     )
-    _compass = (
-        '<svg width="72" height="72" viewBox="0 0 72 72" fill="none" '
+
+    _art_div = (
+        '<div style="position:absolute;top:0;right:0;width:600px;height:720px;'
+        'overflow:hidden;pointer-events:none;z-index:0">'
+        '<svg viewBox="0 0 600 720" width="600" height="720" '
         'xmlns="http://www.w3.org/2000/svg">'
-        '<circle cx="36" cy="36" r="30" stroke="#11366B" stroke-width="2"/>'
-        '<circle cx="36" cy="36" r="3" fill="#11366B"/>'
-        '<line x1="36" y1="6" x2="36" y2="16" stroke="#11366B" stroke-width="1.5"/>'
-        '<line x1="36" y1="56" x2="36" y2="66" stroke="#11366B" stroke-width="1.5"/>'
-        '<line x1="6" y1="36" x2="16" y2="36" stroke="#11366B" stroke-width="1.5"/>'
-        '<line x1="56" y1="36" x2="66" y2="36" stroke="#11366B" stroke-width="1.5"/>'
-        '<polygon points="36,12 39,36 36,32 33,36" fill="#11366B"/>'
-        '<polygon points="36,60 39,36 36,40 33,36" fill="none" stroke="#11366B" stroke-width="1.5"/>'
-        '<text x="32" y="24" font-size="9" fill="#11366B" font-weight="bold" '
-        'font-family="Arial,sans-serif">N</text>'
-        '</svg>'
-    )
-    _pencil = (
-        '<svg width="72" height="72" viewBox="0 0 72 72" fill="none" '
-        'xmlns="http://www.w3.org/2000/svg">'
-        '<polygon points="22,8 50,8 50,56 22,56" stroke="#11366B" stroke-width="2" '
-        'stroke-linejoin="round" transform="rotate(-15 36 32)"/>'
-        '<polygon points="22,56 36,68 50,56" stroke="#11366B" stroke-width="2" '
-        'stroke-linejoin="round" fill="#11366B" opacity="0.5" transform="rotate(-15 36 62)"/>'
-        '<line x1="28" y1="22" x2="44" y2="22" stroke="#11366B" stroke-width="1.5" '
-        'transform="rotate(-15 36 22)"/>'
-        '<line x1="28" y1="30" x2="44" y2="30" stroke="#11366B" stroke-width="1.5" '
-        'transform="rotate(-15 36 30)"/>'
-        '<line x1="28" y1="38" x2="40" y2="38" stroke="#11366B" stroke-width="1.5" '
-        'transform="rotate(-15 36 38)"/>'
-        '</svg>'
+        + _ruled_lines + _pencil_svg +
+        '</svg></div>'
     )
 
     return (
         '<div class="slide-content cover-slide" id="s-cover">'
-        '<div style="position:absolute;top:32px;right:40px">'
-        + _get_logo("dark", "90px") +
+        + _art_div +
+        '<div style="position:absolute;top:32px;right:40px;z-index:2">'
+        + _get_logo("dark", "40px") +
         "</div>"
         '<div class="cover-inner">'
         '<div style="width:50px;height:3px;background:#11366B;margin-bottom:18px"></div>'
@@ -2512,10 +2501,7 @@ def _cover():
         'font-weight:700;color:#11366B;line-height:1.1;margin-bottom:16px">'
         "Cross Asset<br>Technical Vista</h1>"
         '<div style="font-size:15px;color:#4b5563;font-weight:400;'
-        'letter-spacing:.02em;margin-bottom:28px">' + REPORT_DATE + "</div>"
-        '<div style="display:flex;gap:36px;margin-bottom:28px">'
-        + _gear + _compass + _pencil +
-        "</div>"
+        'letter-spacing:.02em;margin-bottom:32px">' + REPORT_DATE + "</div>"
         '<div style="width:50px;height:3px;background:#11366B;margin-bottom:14px"></div>'
         '<p style="font-size:11.5px;color:#6b7280;line-height:1.9">' + names + "</p>"
         "</div></div>"
@@ -2748,6 +2734,18 @@ td { padding: 1px 6px; font-size: 10.5px; border-bottom: 1px solid #e5e7eb; }
 .cover-inner {
   flex: 1; display: flex; flex-direction: column;
   align-items: flex-start; justify-content: center; padding: 52px 64px;
+  position: relative; z-index: 1;
+}
+
+@media print {
+  body { background: white; padding: 0; }
+  .container { max-width: none; }
+  .slide-container { box-shadow: none; width: 100%; height: auto; overflow: visible; }
+  .slide-content {
+    page-break-after: always; break-after: page;
+    width: 100%; height: 100vh; overflow: hidden;
+    padding: 20px 28px 12px;
+  }
 }
 """
 
