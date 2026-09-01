@@ -12,7 +12,10 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # CELL 1 — Imports
 # ═══════════════════════════════════════════════════════════════════════════════
-import bql
+try:
+    import bql
+except ImportError:
+    bql = None   # not in BQuant — cache mode only
 import pandas as pd
 import numpy as np
 import json, os, math, io, base64, warnings, traceback, time, re as _re
@@ -108,11 +111,6 @@ CLAUDE_TEMP    = 0.3
 # ── Cache toggle ──────────────────────────────────────────────────────────────
 USE_CACHE  = False          # True = load from cache; False = fetch from BQL
 SAVE_CACHE = True           # True = auto-save cache after each live BQL run
-CACHE_FILE = "ta_report_cache.pkl"
-
-# ── Cache toggle ──────────────────────────────────────────────────────────────
-USE_CACHE  = False          # True = load from cache; False = fetch from BQL
-SAVE_CACHE = True           # True = auto-save cache after each successful BQL run
 CACHE_FILE = "ta_report_cache.pkl"
 
 print("CELL 2 OK \u2014 FETCH_START: " + FETCH_START
@@ -459,15 +457,19 @@ def compute_indicators(df, asset_type="index"):
     return df
 
 
-# ── Smoke test — validate all 9 assets ────────────────────────────────────────
-for _sk, _sm in ASSETS.items():
-    _df_test = fetch_ohlcv(_sm["ticker"])
-    _df_test = compute_indicators(_df_test, asset_type=_sm["type"])
-    print(f"  {_sm['name']}: rows={len(_df_test)}"
-          f"  SMA55={round(float(_df_test.iloc[-1]['sma55']), 4) if not math.isnan(float(_df_test.iloc[-1]['sma55'])) else 'NaN'}"
-          f"  RSI={round(float(_df_test.iloc[-1]['rsi']), 1) if not math.isnan(float(_df_test.iloc[-1]['rsi'])) else 'NaN'}")
-del _df_test, _sk, _sm
-print("CELL 3 OK — all 9 assets validated")
+# ── Smoke test — validate all 9 assets (live BQL only; skipped in cache mode) ────────
+if not USE_CACHE and bq is not None:
+    for _sk, _sm in ASSETS.items():
+        _df_test = fetch_ohlcv(_sm["ticker"])
+        _df_test = compute_indicators(_df_test, asset_type=_sm["type"])
+        print(f"  {_sm['name']}: rows={len(_df_test)}"
+              f"  SMA55={round(float(_df_test.iloc[-1]['sma55']), 4) if not math.isnan(float(_df_test.iloc[-1]['sma55'])) else 'NaN'}"
+              f"  RSI={round(float(_df_test.iloc[-1]['rsi']), 1) if not math.isnan(float(_df_test.iloc[-1]['rsi'])) else 'NaN'}")
+    del _df_test, _sk, _sm
+    print("CELL 3 OK — all 9 assets validated")
+else:
+    print("CELL 3 OK — functions loaded (BQL smoke test skipped: "
+          + ("cache mode" if USE_CACHE else "BQL unavailable") + ")")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
